@@ -1,0 +1,24 @@
+[package]
+name = "code_gen"
+version = "0.1.0"
+# authors = TODO
+# description = TODO
+# homepage = TODO
+# repository = TODO
+readme = "README.md"
+# keywords = TODO
+# categories = TODO
+license = "MIT/Apache-2.0"
+edition = "2021"
+
+[lib]
+proc-macro = true
+
+[lints]
+#iworkspace = true
+
+[dependencies]
+darling = "0.20.10"
+proc-macro2 = "1.0.89"
+quote = "1.0.37"
+syn = { version = "2.0.87", features = ["full"] }
