@@ -1,6 +1,6 @@
-# abacus-mmio
+# abacus-registers
 
-Abacus provides an mmio register interface that statically prevents 
+Abacus provides a register interface that statically prevents 
 device protocol violations, i.e. software initiated hardware operations
 that violate the hardware's specification.
 
@@ -9,9 +9,9 @@ and device protocol. Abacus then autogenerates type-states and type-state
 transitions to represent the device protocol in the type-system and, using
 the Rust compiler, statically prevent device protocol violations.
 
-## Using abacus-mmio
+## Using abacus-registers
 
-`abacus-mmio` is a wrapper around the [`tock-registers`](https://crates.io/crates/tock-registers) interface. To use
+`abacus-registers` is a wrapper around the [`tock-registers`](https://crates.io/crates/tock-registers) interface. To use
 Abacus, we first annotate the register `struct` as follows:
 
 ```Rust
