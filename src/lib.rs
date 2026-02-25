@@ -69,6 +69,7 @@ impl<T: StateEnum> AbacusCell<T> {
     }
 }
 
+// The following code is copied from Tock's StaticRef.
 use core::clone::Clone;
 use core::fmt::Debug;
 use core::marker::Copy;
@@ -77,7 +78,6 @@ use core::ops::FnOnce;
 use core::option::Option;
 use core::option::Option::None;
 use core::option::Option::Some;
-use core::prelude::rust_2024::derive;
 use core::ptr::NonNull;
 
 /// A pointer to statically allocated mutable data such as memory mapped I/O
