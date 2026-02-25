@@ -1,5 +1,5 @@
 [package]
-name = "abacus_mmio"
+name = "abacus_registers"
 version = "0.1.0"
 # authors = TODO
 # description = TODO
