@@ -14,9 +14,6 @@ edition = "2021"
 [lib]
 proc-macro = true
 
-[lints]
-#iworkspace = true
-
 [dependencies]
 darling = "0.20.10"
 proc-macro2 = "1.0.89"
