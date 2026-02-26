@@ -8,16 +8,21 @@ use syn::{
 
 /// Helper trait for parsing macro input (Abacus DSL) and
 /// used later for code gen.
-#[derive(Clone, Eq, PartialEq, Hash)]
+#[derive(Clone, Eq, PartialEq, Hash, Debug)]
 pub struct State {
     pub state_name: syn::Ident,
     pub substates: Punctuated<syn::Ident, syn::Token![,]>,
 }
 
+
+/// Struct to store parsed state definition.
+#[derive(Clone,Debug)]
 pub struct StateDefinition {
     pub state: State,
     pub transient: bool,
     pub state_shortname: syn::Ident,
+    pub valid_state_transitions: Punctuated<State, syn::Token![,]>
+
 }
 
 impl Parse for State {
@@ -52,130 +57,103 @@ impl Parse for State {
 
 impl Parse for StateDefinition {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let state_definition;
-        let _: syn::token::Paren = syn::parenthesized!(state_definition in input);
-        let state = state_definition.parse::<State>().map_err(|_| {
+        // State definition is of the form:
+        // (State, *T*) => [Transition1, Transition2] **FOR TRANSIENT STATE**
+        // (State) => [Transition1, Transition2] **FOR STABLE STATE** (no shortname for states without substates)
+        // (State(SubState1, ..., SubStateN), shortname) => [Transition1, Transition2] **FOR STABLE STATES**
+        // (State(SubState1, ..., SubStateN), shortname, *T*) => [Transition1, Transition2] **FOR TRANSIENT STATE**
+
+        let state_origin_definition;
+        let _: syn::token::Paren = syn::parenthesized!(state_origin_definition in input);
+        let state = state_origin_definition.parse::<State>().map_err(|_| {
             syn::Error::new(
-                state_definition.span(),
+                state_origin_definition.span(),
                 "Abacus Macro - Error Parsing State.",
             )
         })?;
 
-        // First, check for *T* marker anywhere in the remaining parenthesized content
-        let mut transient = false;
-        if state_definition.peek(syn::Token![,]) {
-            // Look ahead to see if there's a *T* marker after comma(s)
-            let fork = state_definition.fork();
-            let temp_fork = fork;
-
-            // Skip potential comma and shortname to look for *T*
-            while temp_fork.peek(syn::Token![,]) || temp_fork.peek(syn::Ident) {
-                if temp_fork.peek(syn::Token![,]) {
-                    let _: syn::Token![,] = temp_fork.parse().unwrap();
-                } else if temp_fork.peek(syn::Ident) {
-                    let _: syn::Ident = temp_fork.parse().unwrap();
-                }
-
-                // Check for *T* pattern
-                if temp_fork.peek(syn::Token![*])
-                    && temp_fork.peek2(syn::Ident)
-                    && temp_fork.peek3(syn::Token![*])
-                {
-                    let _: syn::Token![*] = temp_fork.parse().unwrap();
-                    let t_ident: syn::Ident = temp_fork.parse().unwrap();
-                    let _: syn::Token![*] = temp_fork.parse().unwrap();
-
-                    if t_ident.to_string() == "T" {
-                        transient = true;
-                        break;
-                    }
-                }
-            }
-        }
-
         let state_shortname = if !state.substates.is_empty() {
             // States with SubState must provide a "shortname" of the form
             // (State(Substates...), shortname).
-            let _: syn::token::Comma = state_definition.parse()
-                .map_err(|_| syn::Error::new(state_definition.span(), "Abacus Macro Error - State Definition Parsing, no comma between state(substate1, ..., substateN) and shortname. Should be of the form `(State(SubState1, ..., SubState2), shortname)`"))?;
+            let _: syn::token::Comma = state_origin_definition.parse()
+                .map_err(|_| syn::Error::new(state_origin_definition.span(), "Abacus Macro Error - State Definition Parsing, no comma between state(substate1, ..., substateN) and shortname. Should be of the form `(State(SubState1, ..., SubState2), shortname)`"))?;
 
-            let short = state_definition.parse().map_err(|_| {
+            state_origin_definition.parse().map_err(|_| {
                 syn::Error::new(
-                    state_definition.span(),
+                    state_origin_definition.span(),
                     "Abacus Macro Error - State Parsing, shortname not provided.",
                 )
-            })?;
-            // Optional ", *T*" after shortname
-            if state_definition.peek(syn::Token![,]) {
-                let _: syn::Token![,] = state_definition.parse()?;
-                if state_definition.peek(syn::Token![*])
-                    && state_definition.peek2(syn::Ident)
-                    && state_definition.peek3(syn::Token![*])
-                {
-                    let _: syn::Token![*] = state_definition.parse()?;
-                    let t_ident: syn::Ident = state_definition.parse()?;
-                    let _: syn::Token![*] = state_definition.parse()?;
-                    if t_ident.to_string() == "T" {
-                        transient = true;
-                    }
-                }
-            }
-            short
+            })?
         } else {
-            // Check if there's a comma indicating an optional shortname or *T* marker
-            if state_definition.peek(syn::Token![,]) {
-                let _: syn::Token![,] = state_definition.parse()?;
-
-                // Could be shortname or *T* marker
-                if state_definition.peek(syn::Token![*])
-                    && state_definition.peek2(syn::Ident)
-                    && state_definition.peek3(syn::Token![*])
-                {
-                    let _: syn::Token![*] = state_definition.parse()?;
-                    let t_ident: syn::Ident = state_definition.parse()?;
-                    let _: syn::Token![*] = state_definition.parse()?;
-                    if t_ident.to_string() == "T" {
-                        transient = true;
-                    }
-                    state.state_name.clone()
-                } else if state_definition.peek(syn::Ident) {
-                    // It's a shortname
-                    let short = state_definition.parse().map_err(|_| {
-                        syn::Error::new(
-                            state_definition.span(),
-                            "Abacus Macro Error - State Parsing, shortname parsing failed.",
-                        )
-                    })?;
-                    // Optional ", *T*" after shortname
-                    if state_definition.peek(syn::Token![,]) {
-                        let _: syn::Token![,] = state_definition.parse()?;
-                        if state_definition.peek(syn::Token![*])
-                            && state_definition.peek2(syn::Ident)
-                            && state_definition.peek3(syn::Token![*])
-                        {
-                            let _: syn::Token![*] = state_definition.parse()?;
-                            let t_ident: syn::Ident = state_definition.parse()?;
-                            let _: syn::Token![*] = state_definition.parse()?;
-                            if t_ident.to_string() == "T" {
-                                transient = true;
-                            }
-                        }
-                    }
-                    short
-                } else {
-                    // No shortname, just use state name
-                    state.state_name.clone()
-                }
-            } else {
-                // In the absence of substates and comma, the shortname is just the state name
-                state.state_name.clone()
-            }
+            state.state_name.clone()
         };
+
+
+        // First, check for *T* marker in the remaining parenthesized content.
+        // Confirm there is nothing else after the *T* marker.
+        let mut transient = false;
+        if state_origin_definition.parse::<syn::Token![,]>().is_ok() {
+            let _: syn::Token![*] = state_origin_definition.parse().map_err(|e| {
+                syn::Error::new(e.span(), "Abacus Macro Error - Expected * at start of transient marker *T*. Should be of the form `(State, *T*) => [Transition1, Transition2]`")
+            })?;
+            let t_ident: Ident = state_origin_definition.parse().map_err(|e| {
+                syn::Error::new(e.span(), "Abacus Macro Error - Expected 'T' in transient marker *T*. Should be of the form `(State, *T*) => [Transition2, ...]`")
+            })?;
+            if t_ident.to_string() != "T" {
+                return Err(syn::Error::new(
+                    t_ident.span(),
+                    format!("Abacus Macro Error - Transient marker *T* must be followed by 'T'. Instead found: {}", t_ident),
+                ));
+            }
+            let _: syn::Token![*] = state_origin_definition.parse().map_err(|_| syn::Error::new(state_origin_definition.span(), "Abacus Macro Error - Error Parsing transient marker *T*. Should be of the form `(State, *T*) => [Transition1, Transition2]`"))?;
+            transient = true;
+        }
+
+        // Check if anything else is left in the state definition
+        if !state_origin_definition.is_empty() {
+            return Err(syn::Error::new(
+                state_origin_definition.span(),
+                format!("Abacus Macro Error - Transient marker *T* must be followed by nothing else. Instead found tokens: {}", state_origin_definition),
+            ));
+        }
+
+        // Consume "=>" operator
+        let _: syn::Token![=>] = input.parse()
+            .map_err(|_| syn::Error::new(input.span(), "Abacus Macro Error - Error Parsing => operator not found. Should be of the form `(State, *T*) => [Transition1, Transition2]`"))?;
+
+        // Parse valid state transitions
+        if !input.peek(syn::token::Bracket) {
+            return Err(syn::Error::new(
+                input.span(),
+                "Abacus Macro Error - Expected state transition list in square brackets. \
+                 Should be of the form: (State) => [Transition1, Transition2, ...]",
+            ));
+        }
+        let valid_state_transitions;
+        let _ = syn::bracketed!(valid_state_transitions in input);
+        let valid_state_transitions: Punctuated<State, syn::Token![,]> = valid_state_transitions
+            .parse_terminated(State::parse, syn::Token![,])
+            .map_err(|e| {
+                syn::Error::new(
+                    e.span(),
+                    format!("Abacus Macro Error - Invalid state transition list: {}. Expected form: [State1, State2, ...]", e),
+                )
+            })?;
+
+        // Reject trailing tokens that aren't a comma (next item in states list).
+        // A trailing comma is valid when used in parse_terminated.
+        if !input.is_empty() && !input.peek(syn::Token![,]) {
+            return Err(syn::Error::new(
+                input.span(),
+                "Abacus Macro Error - Unexpected tokens after state definition. Each `(State) => [Transitions]` entry must be separated by commas, with no extra tokens before the next entry.",
+            ));
+        }
 
         Ok(StateDefinition {
             state,
             transient,
             state_shortname,
+            valid_state_transitions,
         })
     }
 }
@@ -451,8 +429,8 @@ mod tests {
     }
 
     #[test]
-    fn test_state_definition_parse_simple() {
-        let input = quote! { (Off) };
+    fn test_state_origin_definition_parse_simple() {
+        let input = quote! { (Off) => [Transition1, Transition2] };
         let state_def: StateDefinition = syn::parse2(input).unwrap();
 
         assert_eq!(state_def.state.state_name.to_string(), "Off");
@@ -461,26 +439,27 @@ mod tests {
     }
 
     #[test]
-    fn test_state_definition_parse_with_substates() {
-        let input = quote! { (Active(Tx, Rx), ActiveTxRx) };
+    fn test_state_origin_definition_parse_with_substates() {
+        let input = quote! { (Active(Tx, Rx), ActiveTxRx) => [Transition1, Transition2] };
         let state_def: StateDefinition = syn::parse2(input).unwrap();
 
         assert_eq!(state_def.state.state_name.to_string(), "Active");
         assert_eq!(state_def.state_shortname.to_string(), "ActiveTxRx");
+        assert!(!state_def.transient);
         assert_eq!(state_def.state.substates.len(), 2);
     }
 
     #[test]
-    fn test_state_definition_missing_paren_error() {
-        let input = quote! { Off };
+    fn test_state_origin_definition_missing_paren_error() {
+        let input = quote! { Off => [Transition1, Transition2] };
         let result: syn::Result<StateDefinition> = syn::parse2(input);
 
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_state_definition_transient_true() {
-        let input = quote! { (Loading, *T*) };
+    fn test_state_origin_definition_transient_true() {
+        let input = quote! { (Loading, *T*) => [Transition1, Transition2] };
         let state_def: StateDefinition = syn::parse2(input).unwrap();
 
         assert_eq!(state_def.state.state_name.to_string(), "Loading");
@@ -489,18 +468,8 @@ mod tests {
     }
 
     #[test]
-    fn test_state_definition_transient_false() {
-        let input = quote! { (Off) };
-        let state_def: StateDefinition = syn::parse2(input).unwrap();
-
-        assert_eq!(state_def.state.state_name.to_string(), "Off");
-        assert_eq!(state_def.state_shortname.to_string(), "Off");
-        assert!(!state_def.transient);
-    }
-
-    #[test]
-    fn test_state_definition_transient_with_substates() {
-        let input = quote! { (Active(Tx, Rx), ActiveTxRx, *T*) };
+    fn test_state_origin_definition_transient_with_substates() {
+        let input = quote! { (Active(Tx, Rx), ActiveTxRx, *T*) => [Transition1, Transition2] };
         let state_def: StateDefinition = syn::parse2(input).unwrap();
 
         assert_eq!(state_def.state.state_name.to_string(), "Active");
@@ -510,26 +479,8 @@ mod tests {
     }
 
     #[test]
-    fn test_state_definition_invalid_transient_marker() {
-        // Trailing tokens after closing paren cause parse error
-        let input = quote! { (Loading) => [Active] *X* };
-        let result: syn::Result<StateDefinition> = syn::parse2(input);
-
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_state_definition_incomplete_transient_marker() {
-        let input = quote! { (Loading) };
-        let state_def: StateDefinition = syn::parse2(input).unwrap();
-
-        assert_eq!(state_def.state.state_name.to_string(), "Loading");
-        assert!(!state_def.transient);
-    }
-
-    #[test]
-    fn test_state_definition_transient_in_parentheses() {
-        let input = quote! { (Loading, *T*) };
+    fn test_state_origin_definition_transient_in_parentheses() {
+        let input = quote! { (Loading, *T*) => [Transition1, Transition2] };
         let state_def: StateDefinition = syn::parse2(input).unwrap();
 
         assert_eq!(state_def.state.state_name.to_string(), "Loading");
@@ -538,51 +489,32 @@ mod tests {
     }
 
     #[test]
-    fn test_state_definition_transient_with_custom_shortname() {
-        let input = quote! { (Loading, CustomName, *T*) };
-        let state_def: StateDefinition = syn::parse2(input).unwrap();
-
-        assert_eq!(state_def.state.state_name.to_string(), "Loading");
-        assert_eq!(state_def.state_shortname.to_string(), "CustomName");
-        assert!(state_def.transient);
+    fn test_state_origin_definition_invalid_transient_marker_in_parentheses() {
+        let input = quote! { (Loading, *X*) => [Transition1, Transition2] };
+        let result: syn::Result<StateDefinition> = syn::parse2(input);
+        assert!(result.is_err());
     }
 
     #[test]
-    fn test_state_definition_substates_with_transient_in_parentheses() {
-        let input = quote! { (Active(Tx, Rx), ActiveTxRx, *T*) };
-        let state_def: StateDefinition = syn::parse2(input).unwrap();
-
-        assert_eq!(state_def.state.state_name.to_string(), "Active");
-        assert_eq!(state_def.state_shortname.to_string(), "ActiveTxRx");
-        assert!(state_def.transient);
-        assert_eq!(state_def.state.substates.len(), 2);
-    }
-
-    #[test]
-    fn test_state_definition_simple_with_optional_shortname() {
-        let input = quote! { (Loading, CustomName) };
-        let state_def: StateDefinition = syn::parse2(input).unwrap();
-
-        assert_eq!(state_def.state.state_name.to_string(), "Loading");
-        assert_eq!(state_def.state_shortname.to_string(), "CustomName");
-        assert!(!state_def.transient);
-    }
-
-    #[test]
-    fn test_state_definition_invalid_transient_marker_in_parentheses() {
+    fn test_state_origin_definition_substates_invalid_transient_marker_in_parentheses() {
         // *X* is parsed but not recognized as transient (only *T* sets transient), so parse succeeds with transient=false
-        let input = quote! { (Loading, *X*) };
-        let state_def: StateDefinition = syn::parse2(input).unwrap();
+        let input = quote! { (Loading(SubState), Shortname, *X*) => [Transition1, Transition2] };
+        let result: syn::Result<StateDefinition> = syn::parse2(input);
 
-        assert_eq!(state_def.state.state_name.to_string(), "Loading");
-        assert!(!state_def.transient);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_state_origin_definition_invalid_state_transition_list() {
+        let input = quote! { (Loading) => (Transition1, Transition2) };
+        let result: syn::Result<StateDefinition > = syn::parse2(input);
+        assert!(result.is_err());
     }
 
     #[test]
     fn test_register_type_state_change_missing_comma_error() {
         let input = quote! { StateChange(Active [ENABLE::SET]) };
         let result: syn::Result<RegisterType> = syn::parse2(input);
-
         assert!(result.is_err());
     }
 
@@ -604,5 +536,14 @@ mod tests {
             Punctuated::new(),
         );
         assert_eq!(state_change.to_ident().to_string(), "StateChange");
+    }
+
+    #[test]
+    fn test_state_definition_no_trailing() {
+        let input = quote! { (Off) => [Transition1, Transition2] Other};
+        
+        let result: syn::Result<StateDefinition> = syn::parse2(input);
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Unexpected tokens after state definition"));
     }
 }
