@@ -40,7 +40,7 @@ use crate::register::Register;
 pub fn process_register_block(attr: TokenStream, item: TokenStream) -> TokenStream {
     let parsed_input = parse_macro_input!(attr as MacroInput);
     let register = format_ident!("{}Registers", parsed_input.peripheral_name);
-    let internal_register = format_ident!("block");
+    let internal_register = format_ident!("Block");
     let state_enum_ident = format_ident!("{}StateEnum", parsed_input.peripheral_name);
 
     let mut result = add_imports();
