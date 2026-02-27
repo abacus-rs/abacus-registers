@@ -1,40 +1,84 @@
 # .github/workflows/build-tock.yml
-name: Build Tock OS
+name: Build Tock OS (Abacus Variants)
 
 on:
   push:
-    branches:
-      - main
-  workflow_dispatch: # allows manual trigger
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
 
 jobs:
   build-tock:
+    name: nrf52 (abacus = ${{ matrix.source }})
     runs-on: ubuntu-latest
 
+    strategy:
+      fail-fast: false
+      matrix:
+        source:
+          - main
+          - ci-branch
+          # - crates-io  # enable once crate is published
+
     steps:
-    - name: Checkout this workflow repo
-      uses: actions/checkout@v3
+    - name: Checkout workflow repo
+      uses: actions/checkout@v4
 
-    - name: Install Rust toolchain
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        profile: minimal
-        override: true
+    - name: Install Rust + ARM target
+      run: |
+        rustup toolchain install stable
+        rustup default stable
+        rustup target add thumbv7em-none-eabihf
 
-    - name: Install LLVM (required for some boards)
-      run: sudo apt-get update && sudo apt-get install -y llvm clang
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y llvm clang make
 
-    - name: Clone Tock repository
+    - name: Clone Tock fork
       run: |
         git clone https://github.com/abacus-rs/tock.git
         cd tock
         git checkout master
+        git submodule update --init --recursive
 
-    - name: Build Tock for boards
+    # ------------------------------------
+    # GLOBAL PATCH: abacus -> main
+    # Applies to entire workspace
+    # ------------------------------------
+    - name: Override abacus_registers -> main (workspace-wide)
+      if: matrix.source == 'main'
       run: |
         cd tock
-        # Build the kernel (Rust) for the default board (e.g., hail)
-        # Add targets if needed: rustup target add thumbv7em-none-eabihf
-        rustup target add thumbv7em-none-eabihf
+        printf '\n[patch."https://github.com/abacus-rs/abacus-registers"]\n' >> Cargo.toml
+        printf 'abacus_registers = { git = "https://github.com/abacus-rs/abacus-registers", branch = "main" }\n' >> Cargo.toml
+
+    # ------------------------------------
+    # GLOBAL PATCH: abacus -> CI branch
+    # Uses branch that triggered CI
+    # ------------------------------------
+    - name: Override abacus_registers -> CI branch (workspace-wide)
+      if: matrix.source == 'ci-branch'
+      run: |
+        echo "CI branch detected: ${GITHUB_REF_NAME}"
+        cd tock
+        printf '\n[patch."https://github.com/abacus-rs/abacus-registers"]\n' >> Cargo.toml
+        printf 'abacus_registers = { git = "https://github.com/abacus-rs/abacus-registers", branch = "%s" }\n' "${GITHUB_REF_NAME}" >> Cargo.toml
+
+    # (Future) when crate is published
+    # - name: Override abacus_registers -> crates.io
+    #   if: matrix.source == 'crates-io'
+    #   run: |
+    #     cd tock
+    #     printf '\n[patch.crates-io]\n' >> Cargo.toml
+    #     printf 'abacus_registers = { version = "*" }\n' >> Cargo.toml
+
+    - name: Verify resolved abacus source
+      run: |
+        cd tock
+        cargo tree -i abacus_registers || true
+
+    - name: Build nrf52840dk
+      run: |
+        cd tock
         make -C boards/nordic/nrf52840dk
