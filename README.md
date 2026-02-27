@@ -20,8 +20,8 @@ Abacus, we first annotate the register `struct` as follows:
     peripheral_name = "Nrf5xTemp",
     register_base_addr = 0x4000C000,
     states = [
-        Off => [Reading],
-        Reading => [Off],
+        (Off),
+        (Reading),
     ]
 )]
 struct TemperatureRegisters {
@@ -97,5 +97,5 @@ within a closure.
     }
 ```
 
-(see [this branch](https://github.com/abacus-mmio/tock/blob/abacus-mmio/chips/nrf5x/src/temperature.rs) for the full 
+(see [this branch](https://github.com/abacus-rs/tock/blob/master/chips/nrf5x/src/temperature.rs) for the full 
 example shown above)
