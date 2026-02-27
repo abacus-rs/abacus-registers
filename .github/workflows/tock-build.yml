@@ -29,7 +29,7 @@ jobs:
       run: |
         git clone https://github.com/abacus-rs/tock.git
         cd tock
-        git checkout main
+        git checkout master
 
     - name: Build Tock for boards
       run: |
