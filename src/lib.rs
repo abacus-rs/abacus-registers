@@ -41,13 +41,6 @@ pub trait State {}
 /// Implemented by the macro on generated substate types (e.g. Any).
 pub trait SubState {}
 
-/// Marker trait for a state type. Specifies the
-/// associated register block type and state enum type.
-trait TransientState: SyncState {
-    //    type Reg: Reg<StateEnum = Self::StateEnum>;
-    //    type StateEnum: StateEnum;
-}
-
 // (TODO) This is based on Tock's cell types, but soundness
 // needs to be thought more about (e.g. around init/uninit)
 /// Custom Cell type for Abacus to all a driver to store

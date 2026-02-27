@@ -72,14 +72,14 @@ impl MacroInput {
             // 3. As potentially all being any states.
             // TODO: We need to add logic for if there are 3 substates (e.g. <Any, Any, Tx>)
             for iter in 0..(&state.substates.len() + 2) {
-                let mut any_positions: Option<Vec<(usize, Ident)>> = None;
+                let mut _any_positions: Option<Vec<(usize, Ident)>> = None;
 
                 // Case (1)
                 state.substates = original_substates.clone();
 
                 // Case (2)
                 if iter < state.substates.len() {
-                    any_positions = Some(vec![(iter, state.substates[iter].clone())]);
+                    _any_positions = Some(vec![(iter, state.substates[iter].clone())]);
                     state.substates[iter] = format_ident!("Any");
                 }
 
@@ -91,7 +91,7 @@ impl MacroInput {
                         vec.push((pos, substate.clone()));
                     }
 
-                    any_positions = Some(vec);
+                    _any_positions = Some(vec);
                     state
                         .substates
                         .iter_mut()
@@ -161,10 +161,7 @@ impl MacroInput {
                 // - Fully generic (Any, Any): State and Reg only
                 // - Partially generic (Any, TxIdle), (RxIdle, Any): skip
                 let is_concrete = !state.contains_any();
-                let is_fully_generic = state
-                    .substates
-                    .iter()
-                    .all(|s| s.to_string() == "Any");
+                let is_fully_generic = state.substates.iter().all(|s| s.to_string() == "Any");
                 let has_substates = !state.substates.is_empty();
                 if is_concrete {
                     let synthetic_state_def = StateDefinition {

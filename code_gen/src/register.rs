@@ -229,80 +229,6 @@ impl Register {
                     }
                 }
             }
-            RegisterType::StateChangeRW => {
-                if is_anytype {
-                    let (state_ident, generic_tokens, generic_tokens_constrained) =
-                        map_any(self.valid_states.first().unwrap().clone(), format! {"T"});
-                    quote! {
-                        impl <#generic_tokens> StateChangeRegister<#register_bitwidth, #register_shortname, #state_ident>
-                        where
-                            #state_ident: State,
-                            #(#generic_tokens_constrained),*
-                        {
-                            pub fn get(&self) -> #register_bitwidth {
-                                self.reg.get()
-                            }
-                            pub fn set(&self, value: #register_bitwidth) {
-                                self.reg.set(value)
-                            }
-
-                            pub fn write(&self, value: FieldValue<#register_bitwidth, #register_shortname>) {
-                                self.reg.write(value)
-                            }
-
-                            pub fn is_set(&self, field: Field<#register_bitwidth, #register_shortname>) -> bool {
-                                self.reg.is_set(field)
-                            }
-
-                            pub fn modify(&self, value: FieldValue<#register_bitwidth, #register_shortname>) {
-                                self.reg.modify(value)
-                            }
-
-                            pub fn modify_no_read(&self,
-                                original: LocalRegisterCopy<#register_bitwidth, #register_shortname>,
-                                value: FieldValue<#register_bitwidth, #register_shortname>) {
-                                    self.reg.modify_no_read(original, value)
-                            }
-
-                            pub fn read(&self, field: Field<#register_bitwidth, #register_shortname>) -> #register_bitwidth {
-                                self.reg.read(field)
-                            }
-                        }
-                    }
-                } else {
-                    quote! {
-                        impl StateChangeRegister<#register_bitwidth, #register_shortname, #validstate> {
-                            pub fn get(&self) -> #register_bitwidth {
-                                self.reg.get()
-                            }
-                            pub fn set(&self, value: #register_bitwidth) {
-                                self.reg.set(value)
-                            }
-
-                            pub fn write(&self, value: FieldValue<#register_bitwidth, #register_shortname>) {
-                                self.reg.write(value)
-                            }
-                            pub fn is_set(&self, field: Field<#register_bitwidth, #register_shortname>) -> bool {
-                                self.reg.is_set(field)
-                            }
-
-                            pub fn modify(&self, value: FieldValue<#register_bitwidth, #register_shortname>) {
-                                self.reg.modify(value)
-                            }
-
-                            pub fn modify_no_read(&self,
-                                original: LocalRegisterCopy<#register_bitwidth, #register_shortname>,
-                                value: FieldValue<#register_bitwidth, #register_shortname>) {
-                                    self.reg.modify_no_read(original, value)
-                            }
-
-                            pub fn read(&self, field: Field<#register_bitwidth, #register_shortname>) -> #register_bitwidth {
-                                self.reg.read(field)
-                            }
-                        }
-                    }
-                }
-            }
             RegisterType::StateChange(state, instruction, shortname) => {
                 // for Punctuated<Path, Comma> form Path1 + Path2 + Path3
                 let instruct_ident = instruction.iter().map(|instr| {
@@ -438,10 +364,7 @@ impl Register {
     }
 }
 
-pub fn merge_constraint_vec(
-    vec1: Vec<TokenStream>,
-    vec2: Vec<TokenStream>,
-) -> Vec<TokenStream> {
+pub fn merge_constraint_vec(vec1: Vec<TokenStream>, vec2: Vec<TokenStream>) -> Vec<TokenStream> {
     let mut added: HashSet<_> = HashSet::new();
     for item in vec1.clone() {
         added.insert(item.clone().to_string());

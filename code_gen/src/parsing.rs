@@ -212,7 +212,6 @@ pub enum RegisterType {
     /// StateChange(new_state, [instructions], shortname?)
     /// shortname is used for trait Step{Shortname} and method into_{shortname}
     StateChange(State, Punctuated<syn::Path, syn::Token![,]>, Option<syn::Ident>),
-    StateChangeRW,
 }
 
 impl RegisterType {
@@ -222,7 +221,6 @@ impl RegisterType {
             RegisterType::WriteOnly => format_ident!("WriteOnly"),
             RegisterType::ReadWrite => format_ident!("ReadWrite"),
             RegisterType::StateChange(_, _, _) => format_ident!("StateChange"),
-            RegisterType::StateChangeRW => format_ident!("StateChange"),
         }
     }
 }
@@ -589,14 +587,16 @@ mod tests {
     }
 
     #[test]
+    fn test_register_type_state_change_rw() {
+        let reg_type = RegisterType::StateChangeRW;
+        assert_eq!(reg_type.to_ident().to_string(), "StateChange");
+    }
+
+    #[test]
     fn test_register_type_to_ident() {
         assert_eq!(RegisterType::ReadOnly.to_ident().to_string(), "ReadOnly");
         assert_eq!(RegisterType::WriteOnly.to_ident().to_string(), "WriteOnly");
         assert_eq!(RegisterType::ReadWrite.to_ident().to_string(), "ReadWrite");
-        assert_eq!(
-            RegisterType::StateChangeRW.to_ident().to_string(),
-            "StateChange"
-        );
 
         let state_change = RegisterType::StateChange(
             State {
