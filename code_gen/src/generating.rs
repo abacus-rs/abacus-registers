@@ -20,7 +20,7 @@ impl GeneratedStateType {
     ///
     /// Consumes parsed State and forms the Ident that serves as
     /// the corresponding type signature.
-    fn new(mut state: State) -> Self {
+    fn new(state: State) -> Self {
         let state_ident = &state.state_name;
         let mut generics_list = Vec::new();
 
@@ -30,19 +30,29 @@ impl GeneratedStateType {
             // We need to replace the `Any` keyword with a generic
             // that is incremented for each (e.g. State<SubState, Any, Any>
             // must become State<SubState, T0: SubState, T1: SubState>)
-            let args = if state.contains_any() {
-                let mut generic_count = 0;
-                for substate in state.substates.iter_mut() {
-                    if substate.to_string() == "Any" {
-                        let generic_ident = format_ident!("T{}", generic_count.to_string());
-                        generics_list.push(generic_ident.clone());
-                        *substate = format_ident!("{}: SubState", generic_ident);
-                        generic_count += 1;
-                    }
-                }
-                state.substates.iter()
+            // For type args we use just the ident (T0), not T0: SubState - bounds belong on impl.
+            let args: Vec<proc_macro2::TokenStream> = if state.contains_any() {
+                let mut generic_count: usize = 0;
+                state
+                    .substates
+                    .iter()
+                    .map(|substate| {
+                        if substate.to_string() == "Any" {
+                            let generic_ident = format_ident!("T{}", generic_count);
+                            generics_list.push(generic_ident.clone());
+                            generic_count += 1;
+                            quote! { #generic_ident }
+                        } else {
+                            quote! { #substate }
+                        }
+                    })
+                    .collect()
             } else {
-                state.substates.iter()
+                state
+                    .substates
+                    .iter()
+                    .map(|substate| quote! { #substate })
+                    .collect()
             };
             quote! { #state_ident<#(#args),*> }
         };
@@ -63,16 +73,25 @@ impl GeneratedStateType {
 
 impl State {
     /// Check if a state contains any substate named "Any".
-    fn contains_any(&self) -> bool {
+    pub fn contains_any(&self) -> bool {
         self.substates
             .iter()
             .any(|substate| substate.to_string() == "Any")
     }
 
     /// Produces the type signature token stream for this state (e.g. `Off`, `Active<Tx, Rx>`,
-    /// or `Active<T0: SubState, T1: SubState>` when substates contain `Any`).
+    /// or `Active<T0, T1>` when substates contain `Any`).
     pub fn form_state_type_signature_token(&self) -> proc_macro2::TokenStream {
         GeneratedStateType::new(self.clone()).type_signature
+    }
+
+    /// When state contains `Any`, returns impl generics (e.g. `T0: SubState, T1: SubState`)
+    /// for wrapping impl blocks. Returns None when no generics needed.
+    pub fn form_impl_generics_token(&self) -> Option<proc_macro2::TokenStream> {
+        let gen = GeneratedStateType::new(self.clone());
+        gen.generic_parameter_list.map(|params| {
+            quote! { #(#params: SubState),* }
+        })
     }
 
     /// Marker type for this state; used for state_map keys and register bindings.
@@ -105,12 +124,11 @@ pub fn generate_state_enum(
 
     let sync_state_variants = state_definition.iter().map(|state_def| {
         let variant_name = state_def.state_shortname.clone();
-        // Only match / call `reg.sync_state` for transient states.
-        // `sync_state` is only defined for transient states.
+        // For transient states: call reg.sync_state(); for non-transient: identity.
         if state_def.transient {
             quote! { #store_name::#variant_name(reg) => reg.sync_state() }
         } else {
-            quote! {}
+            quote! { #store_name::#variant_name(x) => #store_name::#variant_name(x) }
         }
     });
 
@@ -123,7 +141,6 @@ pub fn generate_state_enum(
             fn sync_state(self) -> Self {
                 match self {
                     #(#sync_state_variants),*
-                    x => x
                 }
             }
         }
@@ -145,12 +162,29 @@ pub fn generate_state(
 
     // Form struct name / generics in angle brackets
     let state_type_signature_ident = state_definition.state.form_state_type_signature_token();
+    let impl_generics = state_definition.state.form_impl_generics_token();
+
+    let (impl_state, impl_reg, impl_from, impl_try_from) = if let Some(generics) = impl_generics {
+        (
+            quote! { impl<#generics> State for #state_type_signature_ident },
+            quote! { impl<#generics> Reg for #register_name<#state_type_signature_ident> },
+            quote! { impl<#generics> From<#register_name<#state_type_signature_ident>> for #state_enum_name },
+            quote! { impl<#generics> TryFrom<#state_enum_name> for #register_name<#state_type_signature_ident> },
+        )
+    } else {
+        (
+            quote! { impl State for #state_type_signature_ident },
+            quote! { impl Reg for #register_name<#state_type_signature_ident> },
+            quote! { impl From<#register_name<#state_type_signature_ident>> for #state_enum_name },
+            quote! { impl TryFrom<#state_enum_name> for #register_name<#state_type_signature_ident> },
+        )
+    };
 
     result.extend(quote! {
-            impl State for #state_type_signature_ident {
+            #impl_state {
             }
 
-            impl Reg for #register_name<#state_type_signature_ident> {
+            #impl_reg {
                 type StateEnum = #state_enum_name;
 
             }
@@ -158,6 +192,42 @@ pub fn generate_state(
     });
 
     result.extend(quote! {
+        #impl_from {
+            fn from(reg: #register_name<#state_type_signature_ident>) -> Self {
+                #state_enum_name::#state_shortname(reg)
+            }
+        }
+
+        #impl_try_from {
+            type Error = #state_enum_name;
+            fn try_from(store: #state_enum_name) -> Result<Self, Self::Error> {
+                match store {
+                    #state_enum_name::#state_shortname(reg) => Ok(reg),
+                    _ => Err(store),
+                }
+            }
+        }
+    });
+
+    result
+}
+
+/// Generates Reg, From, and TryFrom impls (not State). Used for concrete states that have
+/// substates (e.g. Active<RxIdle, TxIdle>). State comes from the generic (Any, Any) impl.
+/// StepOff and similar traits require Reg.
+pub fn generate_state_conversion_impls_only(
+    state_definition: &StateDefinition,
+    state_enum_name: &Ident,
+    register_name: &Ident,
+) -> proc_macro2::TokenStream {
+    let state_shortname = &state_definition.state_shortname;
+    let state_type_signature_ident = state_definition.state.form_state_type_signature_token();
+
+    quote! {
+        impl Reg for #register_name<#state_type_signature_ident> {
+            type StateEnum = #state_enum_name;
+        }
+
         impl From<#register_name<#state_type_signature_ident>> for #state_enum_name {
             fn from(reg: #register_name<#state_type_signature_ident>) -> Self {
                 #state_enum_name::#state_shortname(reg)
@@ -173,9 +243,30 @@ pub fn generate_state(
                 }
             }
         }
-    });
+    }
+}
 
-    result
+/// Generates only `State` impl (no Reg/From/TryFrom). Used for the fully generic (Any, Any)
+/// state to satisfy `Active<T0, T1>: State` in register bindings. Reg/From/TryFrom are
+/// provided by concrete-state impls only to avoid E0119 overlap (generic TryFrom would
+/// conflict with concrete TryFrom).
+pub fn generate_state_trait_impls_only(
+    state_definition: &StateDefinition,
+    _register_name: &Ident,
+    _state_enum_name: &Ident,
+) -> proc_macro2::TokenStream {
+    let state_type_signature_ident = state_definition.state.form_state_type_signature_token();
+    let impl_generics = state_definition.state.form_impl_generics_token();
+
+    let impl_state = if let Some(generics) = impl_generics {
+        quote! { impl<#generics> State for #state_type_signature_ident }
+    } else {
+        quote! { impl State for #state_type_signature_ident }
+    };
+
+    quote! {
+        #impl_state {}
+    }
 }
 
 /*fn map_any_generics(state: &State) -> State {
@@ -572,7 +663,7 @@ pub fn generate_state(
                     }
                 }
             }
-            RegisterType::StateChange(state, instruction) => {
+            RegisterType::StateChange(state, instruction, shortname) => {
                 // for Punctuated<Path, Comma> form Path1 + Path2 + Path3
                 let instruct_ident = instruction.iter().map(|instr| {
                     quote! {
@@ -588,11 +679,12 @@ pub fn generate_state(
                 let mut state_change_output = proc_macro2::TokenStream::new();
 
                 let reg_field_name = self.name.clone();
-                let state_shortname = &state.state_name;
-                let trait_name = format_ident!("Step{}", state_shortname);
+                // Use shortname (e.g. transmit, receive) when provided, else state name (e.g. On)
+                let method_shortname = shortname.as_ref().unwrap_or(&state.state_name);
+                let trait_name = format_ident!("Step{}", method_shortname);
 
                 let to_state_fn_name =
-                    format_ident!("into_{}", state_shortname.to_string().to_lowercase());
+                    format_ident!("into_{}", method_shortname.to_string().to_lowercase());
 
                 if is_anytype {
                     // Create copy of state to change
@@ -712,10 +804,10 @@ pub fn generate_state(
 // Reference samples in code_gen/src/ (inspiration only, not loaded by tests):
 // - sample_code_gen_1: UART (Nrf52Uarte) — input + old generated output.
 // - sample_code_gen_2: Nrf5xTemp — input + old generated output.
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use syn::punctuated::Punctuated;
     use syn::parse_quote;
 
     /// State definitions matching the Nrf5xTemp temperature sensor (Off, Reading).
@@ -727,6 +819,7 @@ mod tests {
                     state,
                     transient: false,
                     state_shortname: parse_quote!(Off),
+                    valid_state_transitions: Punctuated::new(),
                 }
             },
             {
@@ -735,6 +828,7 @@ mod tests {
                     state,
                     transient: false,
                     state_shortname: parse_quote!(Reading),
+                    valid_state_transitions: Punctuated::new(),
                 }
             },
         ]
@@ -745,7 +839,12 @@ mod tests {
         vec![
             {
                 let state: State = parse_quote!(Off);
-                StateDefinition { state, transient: false, state_shortname: parse_quote!(Off) }
+                StateDefinition {
+                    state,
+                    transient: false,
+                    state_shortname: parse_quote!(Off),
+                    valid_state_transitions: Punctuated::new(),
+                }
             },
             {
                 let state: State = parse_quote!(Active(RxIdle, TxIdle));
@@ -753,6 +852,7 @@ mod tests {
                     state,
                     transient: false,
                     state_shortname: parse_quote!(ActiveIdle),
+                    valid_state_transitions: Punctuated::new(),
                 }
             },
             {
@@ -761,6 +861,7 @@ mod tests {
                     state,
                     transient: false,
                     state_shortname: parse_quote!(ActiveRx),
+                    valid_state_transitions: Punctuated::new(),
                 }
             },
             {
@@ -769,6 +870,7 @@ mod tests {
                     state,
                     transient: false,
                     state_shortname: parse_quote!(ActiveTx),
+                    valid_state_transitions: Punctuated::new(),
                 }
             },
             {
@@ -777,6 +879,7 @@ mod tests {
                     state,
                     transient: false,
                     state_shortname: parse_quote!(ActiveRxTx),
+                    valid_state_transitions: Punctuated::new(),
                 }
             },
         ]
@@ -853,7 +956,9 @@ mod tests {
         let s = full.to_string();
 
         assert!(s.contains("impl State for Off"));
-        assert!(s.contains("impl State for Active") && s.contains("RxIdle") && s.contains("TxIdle"));
+        assert!(
+            s.contains("impl State for Active") && s.contains("RxIdle") && s.contains("TxIdle")
+        );
         assert!(s.contains("Transient"));
         assert!(s.contains("impl Reg for Nrf52UarteRegisters"));
         assert!(s.contains("From"));
@@ -866,6 +971,7 @@ mod tests {
             state,
             transient: true,
             state_shortname: parse_quote!(Loading),
+            valid_state_transitions: Punctuated::new(),
         }
     }
 
@@ -875,6 +981,7 @@ mod tests {
             state,
             transient: false,
             state_shortname: parse_quote!(Off),
+            valid_state_transitions: Punctuated::new(),
         }
     }
 
@@ -888,10 +995,19 @@ mod tests {
         let s = out.to_string();
 
         assert!(s.contains("StateEnum"), "output should implement StateEnum");
-        assert!(s.contains("PeriphStateEnum"), "output should contain state enum name");
-        assert!(s.contains("PeriphRegisters"), "output should contain register name");
+        assert!(
+            s.contains("PeriphStateEnum"),
+            "output should contain state enum name"
+        );
+        assert!(
+            s.contains("PeriphRegisters"),
+            "output should contain register name"
+        );
         assert!(s.contains("Off"), "output should contain Off variant");
-        assert!(s.contains("Loading"), "output should contain Loading variant");
+        assert!(
+            s.contains("Loading"),
+            "output should contain Loading variant"
+        );
         assert!(
             s.contains("sync_state"),
             "output should contain sync_state for StateEnum"
@@ -924,7 +1040,10 @@ mod tests {
         let out = generate_state(&state_def, &store, &register);
         let s = out.to_string();
 
-        assert!(s.contains("impl State for Off"), "output should impl State for state type");
+        assert!(
+            s.contains("impl State for Off"),
+            "output should impl State for state type"
+        );
         assert!(
             s.contains("impl Reg for PeriphRegisters"),
             "output should impl Reg for register<state>"
@@ -950,5 +1069,217 @@ mod tests {
         assert!(s.contains("Active"));
         assert!(s.contains("Tx"));
         assert!(s.contains("Rx"));
+    }
+
+    /// Regression test: states with `Any` substate must produce valid type args (e.g. `T0`),
+    /// not `T0: SubState` in type position (invalid) or "T0: SubState" identifier (panics).
+    #[test]
+    fn test_form_state_type_signature_with_any_substate() {
+        let state: State = parse_quote!(Active(RxIdle, Any));
+        let ts = state.form_state_type_signature_token();
+        let s = ts.to_string();
+        assert!(s.contains("Active"));
+        assert!(s.contains("RxIdle"));
+        assert!(s.contains("T0"));
+        // Bounds go on impl, not in type args
+        assert!(!s.contains("SubState"), "type args should not contain inline bounds");
+    }
+
+    #[test]
+    fn test_form_impl_generics_token_with_any() {
+        let state: State = parse_quote!(Active(RxIdle, Any));
+        let generics = state.form_impl_generics_token();
+        assert!(generics.is_some(), "state with Any should have impl generics");
+        let s = generics.unwrap().to_string();
+        assert!(s.contains("T0"));
+        assert!(s.contains("SubState"));
+    }
+
+    #[test]
+    fn test_form_impl_generics_token_without_any() {
+        let state: State = parse_quote!(Active(RxIdle, TxIdle));
+        let generics = state.form_impl_generics_token();
+        assert!(generics.is_none(), "state without Any should not have impl generics");
+    }
+
+    /// Regression test: generate_state with Any must produce impl<T0: SubState>, not
+    /// invalid impl State for Active<T0: SubState, TxIdle> (bounds in type position).
+    #[test]
+    fn test_generate_state_with_any_uses_impl_generics() {
+        let state: State = parse_quote!(Active(RxIdle, Any));
+        let state_def = StateDefinition {
+            state,
+            transient: false,
+            state_shortname: parse_quote!(ActiveIdle),
+            valid_state_transitions: Punctuated::new(),
+        };
+        let register = format_ident!("TestRegisters");
+        let store = format_ident!("TestStateEnum");
+
+        let out = generate_state(&state_def, &register, &store);
+        let s = out.to_string();
+
+        // Must use impl<T0: SubState>, not impl State for Active<T0: SubState, ...>
+        assert!(
+            s.contains("impl < T0 : SubState >"),
+            "impl block must declare generics: {:?}",
+            s
+        );
+        assert!(
+            s.contains("Active < RxIdle , T0 >"),
+            "type args must use T0 without inline bound: {:?}",
+            s
+        );
+    }
+
+    // --- Regression tests for E0119/E0277 bugs during Nrf52 UART debugging ---
+
+    /// E0277 regression: StepOff requires Reg. generate_state_conversion_impls_only must emit Reg.
+    #[test]
+    fn test_generate_state_conversion_impls_only_emits_reg() {
+        let state_def = StateDefinition {
+            state: parse_quote!(Active(RxIdle, TxIdle)),
+            transient: false,
+            state_shortname: parse_quote!(ActiveIdle),
+            valid_state_transitions: Punctuated::new(),
+        };
+        let out = generate_state_conversion_impls_only(
+            &state_def,
+            &format_ident!("TestStateEnum"),
+            &format_ident!("TestRegisters"),
+        );
+        let s = out.to_string();
+        assert!(
+            s.contains("impl Reg for TestRegisters"),
+            "must emit Reg for StepOff: {:?}",
+            s
+        );
+    }
+
+    /// E0277 regression: must emit From and TryFrom for enum conversions.
+    #[test]
+    fn test_generate_state_conversion_impls_only_emits_from_tryfrom() {
+        let state_def = StateDefinition {
+            state: parse_quote!(Active(RxIdle, TxIdle)),
+            transient: false,
+            state_shortname: parse_quote!(ActiveIdle),
+            valid_state_transitions: Punctuated::new(),
+        };
+        let out = generate_state_conversion_impls_only(
+            &state_def,
+            &format_ident!("TestStateEnum"),
+            &format_ident!("TestRegisters"),
+        );
+        let s = out.to_string();
+        assert!(s.contains("impl From<"), "must emit From: {:?}", s);
+        assert!(s.contains("impl TryFrom<"), "must emit TryFrom: {:?}", s);
+    }
+
+    /// E0119 regression: conversion impls must NOT emit State (generic provides it, would overlap).
+    #[test]
+    fn test_generate_state_conversion_impls_only_no_state_impl() {
+        let state_def = StateDefinition {
+            state: parse_quote!(Active(RxIdle, TxIdle)),
+            transient: false,
+            state_shortname: parse_quote!(ActiveIdle),
+            valid_state_transitions: Punctuated::new(),
+        };
+        let out = generate_state_conversion_impls_only(
+            &state_def,
+            &format_ident!("TestStateEnum"),
+            &format_ident!("TestRegisters"),
+        );
+        let s = out.to_string();
+        assert!(
+            !s.contains("impl State for"),
+            "must not emit State (generic provides it, would cause E0119 overlap): {:?}",
+            s
+        );
+    }
+
+    /// E0119 regression: generic impl must NOT emit Reg or TryFrom (would overlap with concrete).
+    #[test]
+    fn test_generate_state_trait_impls_only_state_only() {
+        let state_def = StateDefinition {
+            state: parse_quote!(Active(Any, Any)),
+            transient: false,
+            state_shortname: parse_quote!(ActiveIdle),
+            valid_state_transitions: Punctuated::new(),
+        };
+        let out = generate_state_trait_impls_only(
+            &state_def,
+            &format_ident!("TestRegisters"),
+            &format_ident!("TestStateEnum"),
+        );
+        let s = out.to_string();
+        assert!(s.contains("impl"), "must emit State impl: {:?}", s);
+        assert!(
+            !s.contains("impl Reg "),
+            "must not emit Reg (would overlap with concrete, E0119): {:?}",
+            s
+        );
+        assert!(
+            !s.contains("TryFrom"),
+            "must not emit TryFrom (would overlap with concrete, E0119): {:?}",
+            s
+        );
+    }
+
+    /// E0119 regression: verify Nrf52 UART-style output has no duplicate impl patterns.
+    /// Concrete states get Reg+From+TryFrom, generic gets State only.
+    #[test]
+    fn test_nrf52_uarte_impl_split_no_overlaps() {
+        let state_defs = nrf52_uarte_state_definitions();
+        let register = format_ident!("Nrf52UarteRegisters");
+        let store = format_ident!("Nrf52UarteStateEnum");
+
+        let mut full = proc_macro2::TokenStream::new();
+        for state_def in &state_defs {
+            let state = &state_def.state;
+            let is_concrete = !state.contains_any();
+            let has_substates = !state.substates.is_empty();
+
+            if is_concrete {
+                if has_substates {
+                    full.extend(generate_state_conversion_impls_only(
+                        state_def, &store, &register,
+                    ));
+                } else {
+                    full.extend(generate_state(state_def, &store, &register));
+                }
+            }
+        }
+        // Add generic State impl (from Any,Any case)
+        let any_any_def = StateDefinition {
+            state: parse_quote!(Active(Any, Any)),
+            transient: false,
+            state_shortname: parse_quote!(ActiveIdle),
+            valid_state_transitions: Punctuated::new(),
+        };
+        full.extend(generate_state_trait_impls_only(
+            &any_any_def, &register, &store,
+        ));
+
+        let s = full.to_string();
+        // Should have exactly one "impl Reg for Nrf52UarteRegisters" per concrete state
+        let reg_count = s.matches("impl Reg for Nrf52UarteRegisters").count();
+        assert_eq!(
+            reg_count, 5,
+            "expect 5 Reg impls (Off + 4 Active variants), got {}: {:?}",
+            reg_count, s
+        );
+        // Should have exactly one "impl TryFrom" per concrete state
+        let tryfrom_count = s.matches("impl TryFrom<").count();
+        assert_eq!(
+            tryfrom_count, 5,
+            "expect 5 TryFrom impls, got {}: {:?}",
+            tryfrom_count, s
+        );
+        // Should have exactly one generic State impl (for Active<T0, T1>)
+        assert!(
+            s.contains("impl < T0 : SubState , T1 : SubState > State for Active < T0 , T1 >"),
+            "must have generic State impl: {:?}",
+            s
+        );
     }
 }

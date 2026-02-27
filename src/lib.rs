@@ -30,6 +30,14 @@ pub trait StateEnum {
     fn sync_state(self) -> Self;
 }
 
+/// Marker trait for a peripheral hardware state (e.g. Off, Reading).
+/// Implemented by the macro on generated state types.
+pub trait State {}
+
+/// Marker trait for a substate within a composite state.
+/// Implemented by the macro on generated substate types (e.g. Any).
+pub trait SubState {}
+
 /// Marker trait for a state type. Specifies the
 /// associated register block type and state enum type.
 trait TransientState: SyncState {

@@ -163,7 +163,9 @@ pub enum RegisterType {
     ReadOnly,
     WriteOnly,
     ReadWrite,
-    StateChange(State, Punctuated<syn::Path, syn::Token![,]>),
+    /// StateChange(new_state, [instructions], shortname?)
+    /// shortname is used for trait Step{Shortname} and method into_{shortname}
+    StateChange(State, Punctuated<syn::Path, syn::Token![,]>, Option<syn::Ident>),
     StateChangeRW,
 }
 
@@ -173,7 +175,7 @@ impl RegisterType {
             RegisterType::ReadOnly => format_ident!("ReadOnly"),
             RegisterType::WriteOnly => format_ident!("WriteOnly"),
             RegisterType::ReadWrite => format_ident!("ReadWrite"),
-            RegisterType::StateChange(_, _) => format_ident!("StateChange"),
+            RegisterType::StateChange(_, _, _) => format_ident!("StateChange"),
             RegisterType::StateChangeRW => format_ident!("StateChange"),
         }
     }
@@ -217,7 +219,19 @@ impl Parse for RegisterType {
                         )
                     })?;
 
-                return Ok(RegisterType::StateChange(new_state, bitfield_instr));
+                // Optional shortname for method (e.g. transmit, receive) - used for into_transmit, into_receive
+                let shortname = if content.parse::<syn::Token![,]>().is_ok() {
+                    Some(content.parse::<syn::Ident>().map_err(|_| {
+                        syn::Error::new(
+                            content.span(),
+                            "Error in StateChange: expected identifier (shortname) after comma.",
+                        )
+                    })?)
+                } else {
+                    None
+                };
+
+                return Ok(RegisterType::StateChange(new_state, bitfield_instr, shortname));
             }
             _ => Err(syn::Error::new(
                 ident.span(),
@@ -349,8 +363,9 @@ mod tests {
         let reg_type: RegisterType = syn::parse2(input).unwrap();
 
         match reg_type {
-            RegisterType::StateChange(state, instructions) => {
+            RegisterType::StateChange(state, instructions, shortname) => {
                 assert_eq!(state.state_name.to_string(), "Active");
+                assert!(shortname.is_none());
                 assert_eq!(instructions.len(), 2);
 
                 let instruction_str: String = instructions
@@ -362,6 +377,21 @@ mod tests {
                 assert!(instruction_str.contains("SET"));
                 assert!(instruction_str.contains("MODE"));
                 assert!(instruction_str.contains("CONTINUOUS"));
+            }
+            _ => panic!("Expected StateChange register type"),
+        }
+    }
+
+    #[test]
+    fn test_register_type_parse_state_change_with_shortname() {
+        let input = quote! { StateChange(On(Transient), [Task::ENABLE::SET], transmit) };
+        let reg_type: RegisterType = syn::parse2(input).unwrap();
+
+        match reg_type {
+            RegisterType::StateChange(state, instructions, shortname) => {
+                assert_eq!(state.state_name.to_string(), "On");
+                assert_eq!(instructions.len(), 1);
+                assert_eq!(shortname.as_ref().unwrap().to_string(), "transmit");
             }
             _ => panic!("Expected StateChange register type"),
         }
@@ -534,6 +564,7 @@ mod tests {
                 substates: Punctuated::new(),
             },
             Punctuated::new(),
+            None,
         );
         assert_eq!(state_change.to_ident().to_string(), "StateChange");
     }
