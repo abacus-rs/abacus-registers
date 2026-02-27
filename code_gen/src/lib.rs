@@ -14,8 +14,8 @@
 //!     peripheral_name = "Nrf5xTemp",
 //!     register_base_addr = 0x4000C000,
 //!     states = [              <------------ Define peripheral states
-//!         Off => [Reading],   <------------ Define state transitions for each state
-//!         Reading => [Off],
+//!         (Off),
+//!         (Reading),
 //!     ]
 //! )]
 //!
@@ -635,7 +635,6 @@ impl MacroInput {
                         state: state.clone(),
                         transient: state_def.transient,
                         state_shortname: state_def.state_shortname.clone(),
-                        valid_state_transitions: state_def.valid_state_transitions.clone(),
                     };
                     if has_substates {
                         output.extend(generating::generate_state_conversion_impls_only(
@@ -655,7 +654,6 @@ impl MacroInput {
                         state: state.clone(),
                         transient: state_def.transient,
                         state_shortname: state_def.state_shortname.clone(),
-                        valid_state_transitions: state_def.valid_state_transitions.clone(),
                     };
                     output.extend(generating::generate_state_trait_impls_only(
                         &synthetic_state_def,

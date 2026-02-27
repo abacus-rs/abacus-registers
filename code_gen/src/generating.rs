@@ -807,7 +807,6 @@ pub fn generate_state_trait_impls_only(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use syn::punctuated::Punctuated;
     use syn::parse_quote;
 
     /// State definitions matching the Nrf5xTemp temperature sensor (Off, Reading).
@@ -819,7 +818,6 @@ mod tests {
                     state,
                     transient: false,
                     state_shortname: parse_quote!(Off),
-                    valid_state_transitions: Punctuated::new(),
                 }
             },
             {
@@ -828,7 +826,6 @@ mod tests {
                     state,
                     transient: false,
                     state_shortname: parse_quote!(Reading),
-                    valid_state_transitions: Punctuated::new(),
                 }
             },
         ]
@@ -843,7 +840,6 @@ mod tests {
                     state,
                     transient: false,
                     state_shortname: parse_quote!(Off),
-                    valid_state_transitions: Punctuated::new(),
                 }
             },
             {
@@ -852,7 +848,6 @@ mod tests {
                     state,
                     transient: false,
                     state_shortname: parse_quote!(ActiveIdle),
-                    valid_state_transitions: Punctuated::new(),
                 }
             },
             {
@@ -861,7 +856,6 @@ mod tests {
                     state,
                     transient: false,
                     state_shortname: parse_quote!(ActiveRx),
-                    valid_state_transitions: Punctuated::new(),
                 }
             },
             {
@@ -870,7 +864,6 @@ mod tests {
                     state,
                     transient: false,
                     state_shortname: parse_quote!(ActiveTx),
-                    valid_state_transitions: Punctuated::new(),
                 }
             },
             {
@@ -879,7 +872,6 @@ mod tests {
                     state,
                     transient: false,
                     state_shortname: parse_quote!(ActiveRxTx),
-                    valid_state_transitions: Punctuated::new(),
                 }
             },
         ]
@@ -971,7 +963,6 @@ mod tests {
             state,
             transient: true,
             state_shortname: parse_quote!(Loading),
-            valid_state_transitions: Punctuated::new(),
         }
     }
 
@@ -981,7 +972,6 @@ mod tests {
             state,
             transient: false,
             state_shortname: parse_quote!(Off),
-            valid_state_transitions: Punctuated::new(),
         }
     }
 
@@ -1111,7 +1101,6 @@ mod tests {
             state,
             transient: false,
             state_shortname: parse_quote!(ActiveIdle),
-            valid_state_transitions: Punctuated::new(),
         };
         let register = format_ident!("TestRegisters");
         let store = format_ident!("TestStateEnum");
@@ -1141,7 +1130,6 @@ mod tests {
             state: parse_quote!(Active(RxIdle, TxIdle)),
             transient: false,
             state_shortname: parse_quote!(ActiveIdle),
-            valid_state_transitions: Punctuated::new(),
         };
         let out = generate_state_conversion_impls_only(
             &state_def,
@@ -1163,7 +1151,6 @@ mod tests {
             state: parse_quote!(Active(RxIdle, TxIdle)),
             transient: false,
             state_shortname: parse_quote!(ActiveIdle),
-            valid_state_transitions: Punctuated::new(),
         };
         let out = generate_state_conversion_impls_only(
             &state_def,
@@ -1171,8 +1158,8 @@ mod tests {
             &format_ident!("TestRegisters"),
         );
         let s = out.to_string();
-        assert!(s.contains("impl From<"), "must emit From: {:?}", s);
-        assert!(s.contains("impl TryFrom<"), "must emit TryFrom: {:?}", s);
+        assert!(s.contains("impl From"), "must emit From: {:?}", s);
+        assert!(s.contains("impl TryFrom"), "must emit TryFrom: {:?}", s);
     }
 
     /// E0119 regression: conversion impls must NOT emit State (generic provides it, would overlap).
@@ -1182,7 +1169,6 @@ mod tests {
             state: parse_quote!(Active(RxIdle, TxIdle)),
             transient: false,
             state_shortname: parse_quote!(ActiveIdle),
-            valid_state_transitions: Punctuated::new(),
         };
         let out = generate_state_conversion_impls_only(
             &state_def,
@@ -1204,7 +1190,6 @@ mod tests {
             state: parse_quote!(Active(Any, Any)),
             transient: false,
             state_shortname: parse_quote!(ActiveIdle),
-            valid_state_transitions: Punctuated::new(),
         };
         let out = generate_state_trait_impls_only(
             &state_def,
@@ -1254,7 +1239,6 @@ mod tests {
             state: parse_quote!(Active(Any, Any)),
             transient: false,
             state_shortname: parse_quote!(ActiveIdle),
-            valid_state_transitions: Punctuated::new(),
         };
         full.extend(generate_state_trait_impls_only(
             &any_any_def, &register, &store,
@@ -1269,7 +1253,7 @@ mod tests {
             reg_count, s
         );
         // Should have exactly one "impl TryFrom" per concrete state
-        let tryfrom_count = s.matches("impl TryFrom<").count();
+        let tryfrom_count = s.matches("impl TryFrom").count();
         assert_eq!(
             tryfrom_count, 5,
             "expect 5 TryFrom impls, got {}: {:?}",
