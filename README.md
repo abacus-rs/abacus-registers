@@ -97,5 +97,5 @@ within a closure.
     }
 ```
 
-(see [this branch](https://github.com/abacus-mmio/tock/blob/abacus-mmio/chips/nrf5x/src/temperature.rs) for the full 
+(see [this branch](https://github.com/abacus-rs/tock/blob/master/chips/nrf5x/src/temperature.rs) for the full 
 example shown above)
