@@ -1,84 +1,113 @@
 # .github/workflows/build-tock.yml
-name: Build Tock OS (Abacus Variants)
+name: Build Tock OS (Abacus CI)
 
 on:
   push:
-    branches: ["**"]
+    branches: ["**"]   # any branch push
   pull_request:
+    branches: [main]   # merges into main
+  schedule:
+    - cron: "0 6 * * *"  # nightly (6 AM UTC)
   workflow_dispatch:
 
 jobs:
-  build-tock:
-    name: nrf52 (abacus = ${{ matrix.source }})
+  determine-matrix:
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          echo "Event: ${{ github.event_name }}"
+          echo "Ref: ${{ github.ref_name }}"
 
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            # Only test the pushed branch (fast dev loop)
+            echo 'matrix={"source":["ci-branch"]}' >> $GITHUB_OUTPUT
+
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # Full integration test for merges into main
+            echo 'matrix={"source":["ci-branch","main","crate"]}' >> $GITHUB_OUTPUT
+
+          elif [[ "${{ github.event_name }}" == "schedule" ]]; then
+            # Nightly stability check (main + future crate)
+            echo 'matrix={"source":["main","crate"]}' >> $GITHUB_OUTPUT
+
+          else
+            # Manual dispatch = full test
+            echo 'matrix={"source":["ci-branch","main","crate"]}' >> $GITHUB_OUTPUT
+          fi
+
+  build-tock:
+    needs: determine-matrix
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        source:
-          - main
-          - ci-branch
-          # - crates-io  # enable once crate is published
+      matrix: ${{ fromJson(needs.determine-matrix.outputs.matrix) }}
+
+    name: nrf52840dk (abacus = ${{ matrix.source }})
 
     steps:
-    - name: Checkout workflow repo
-      uses: actions/checkout@v4
+      - name: Checkout abacus-registers repo (current branch)
+        uses: actions/checkout@v4
 
-    - name: Install Rust + ARM target
-      run: |
-        rustup toolchain install stable
-        rustup default stable
-        rustup target add thumbv7em-none-eabihf
+      - name: Install Rust + ARM target
+        run: |
+          rustup toolchain install stable
+          rustup default stable
+          rustup target add thumbv7em-none-eabihf
 
-    - name: Install system dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y llvm clang make
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm clang make
 
-    - name: Clone Tock fork
-      run: |
-        git clone https://github.com/abacus-rs/tock.git
-        cd tock
-        git checkout master
-        git submodule update --init --recursive
+      - name: Clone Tock
+        run: |
+          git clone https://github.com/abacus-rs/tock.git
+          cd tock
+          git checkout master
+          git submodule update --init --recursive
 
-    # ------------------------------------
-    # GLOBAL PATCH: abacus -> main
-    # Applies to entire workspace
-    # ------------------------------------
-    - name: Override abacus_registers -> main (workspace-wide)
-      if: matrix.source == 'main'
-      run: |
-        cd tock
-        printf '\n[patch."https://github.com/abacus-rs/abacus-registers"]\n' >> Cargo.toml
-        printf 'abacus_registers = { git = "https://github.com/abacus-rs/abacus-registers", branch = "main" }\n' >> Cargo.toml
+      # -------------------------------------------------
+      # Variant 1: Use CURRENT CI branch (most important)
+      # BEST for pushes to feature branches
+      # -------------------------------------------------
+      - name: Patch abacus_registers -> local checkout (CI branch)
+        if: matrix.source == 'ci-branch'
+        run: |
+          echo "Using local abacus-registers checkout (branch: ${GITHUB_REF_NAME})"
+          cd tock
+          printf '\n[patch.crates-io]\n' >> Cargo.toml
+          printf 'abacus_registers = { path = "../" }\n' >> Cargo.toml
 
-    # ------------------------------------
-    # GLOBAL PATCH: abacus -> CI branch
-    # Uses branch that triggered CI
-    # ------------------------------------
-    - name: Override abacus_registers -> CI branch (workspace-wide)
-      if: matrix.source == 'ci-branch'
-      run: |
-        echo "CI branch detected: ${GITHUB_REF_NAME}"
-        cd tock
-        printf '\n[patch."https://github.com/abacus-rs/abacus-registers"]\n' >> Cargo.toml
-        printf 'abacus_registers = { git = "https://github.com/abacus-rs/abacus-registers", branch = "%s" }\n' "${GITHUB_REF_NAME}" >> Cargo.toml
+      # -------------------------------------------------
+      # Variant 2: Force main branch of abacus_registers
+      # Used for PRs + nightly
+      # -------------------------------------------------
+      - name: Patch abacus_registers -> git main
+        if: matrix.source == 'main'
+        run: |
+          cd tock
+          printf '\n[patch."https://github.com/abacus-rs/abacus-registers"]\n' >> Cargo.toml
+          printf 'abacus_registers = { git = "https://github.com/abacus-rs/abacus-registers", branch = "main" }\n' >> Cargo.toml
 
-    # (Future) when crate is published
-    # - name: Override abacus_registers -> crates.io
-    #   if: matrix.source == 'crates-io'
-    #   run: |
-    #     cd tock
-    #     printf '\n[patch.crates-io]\n' >> Cargo.toml
-    #     printf 'abacus_registers = { version = "*" }\n' >> Cargo.toml
+      # -------------------------------------------------
+      # Variant 3: crates.io (disabled until published)
+      # -------------------------------------------------
+      - name: Patch abacus_registers -> crates.io
+        if: matrix.source == 'crate'
+        run: |
+          cd tock
+          printf '\n[patch.crates-io]\n' >> Cargo.toml
+          printf 'abacus_registers = { version = "*" }\n' >> Cargo.toml
 
-    - name: Verify resolved abacus source
-      run: |
-        cd tock
-        cargo tree -i abacus_registers || true
+      - name: Show resolved abacus source
+        run: |
+          cd tock
+          cargo tree -i abacus_registers || true
 
-    - name: Build nrf52840dk
-      run: |
-        cd tock
-        make -C boards/nordic/nrf52840dk
+      - name: Build nrf52840dk
+        run: |
+          cd tock
+          make -C boards/nordic/nrf52840dk
