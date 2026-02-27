@@ -201,6 +201,17 @@ pub fn generate_state(
         }
     });
 
+    // Transient states must implement SyncState (enforced via TransientStateReg supertrait).
+    if state_definition.transient {
+        let impl_transient = match state_definition.state.form_impl_generics_token() {
+            Some(generics) => quote! { impl<#generics> TransientStateReg for #register_name<#state_type_signature_ident> },
+            None => quote! { impl TransientStateReg for #register_name<#state_type_signature_ident> },
+        };
+        result.extend(quote! {
+            #impl_transient {}
+        });
+    }
+
     result
 }
 
@@ -215,7 +226,8 @@ pub fn generate_state_conversion_impls_only(
     let state_shortname = &state_definition.state_shortname;
     let state_type_signature_ident = state_definition.state.form_state_type_signature_token();
 
-    quote! {
+    let mut result = proc_macro2::TokenStream::new();
+    result.extend(quote! {
         impl Reg for #register_name<#state_type_signature_ident> {
             type StateEnum = #state_enum_name;
         }
@@ -235,7 +247,15 @@ pub fn generate_state_conversion_impls_only(
                 }
             }
         }
+    });
+
+    if state_definition.transient {
+        result.extend(quote! {
+            impl TransientStateReg for #register_name<#state_type_signature_ident> {}
+        });
     }
+
+    result
 }
 
 /// Generates only `State` impl (no Reg/From/TryFrom). Used for the fully generic (Any, Any)

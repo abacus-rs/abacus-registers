@@ -16,7 +16,10 @@ where
 }
 
 pub trait StableStateReg {}
-pub trait TransientStateReg {}
+
+/// Marker trait for register types in transient states. Requires [`SyncState`]
+/// so that transient states can be reconciled to stable states.
+pub trait TransientStateReg: SyncState {}
 
 /// User implemented trait that reconciles the state
 /// from a transient state.

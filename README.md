@@ -20,8 +20,8 @@ Abacus, we first annotate the register `struct` as follows:
     peripheral_name = "Nrf5xTemp",
     register_base_addr = 0x4000C000,
     states = [
-        Off => [Reading],
-        Reading => [Off],
+        (Off),
+        (Reading),
     ]
 )]
 struct TemperatureRegisters {

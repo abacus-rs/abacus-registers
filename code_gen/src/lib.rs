@@ -21,667 +21,62 @@
 //!
 //!
 
-use proc_macro::TokenStream;
-use proc_macro2::Span;
-use quote::{format_ident, quote};
-use syn::{
-    bracketed,
-    parse::{Parse, ParseStream},
-    parse_macro_input,
-    punctuated::Punctuated,
-    DeriveInput, Field, FieldMutability, Fields, FieldsUnnamed, Ident, ItemFn, PathArguments, Type,
-    Variant, Visibility,
-};
-
-use std::collections::{hash_set::HashSet, HashMap};
-
 mod generating;
+mod macro_input;
 mod parsing;
+mod register;
+
+use proc_macro::TokenStream;
+use quote::{format_ident, quote};
+use syn::{parse_macro_input, DeriveInput, Field, Type};
+
+use std::collections::HashSet;
 
 use crate::generating::generate_state_enum;
-use crate::parsing::{RegisterType, State, StateDefinition};
+use crate::macro_input::MacroInput;
+use crate::register::Register;
 
-impl StateDefinition {}
+#[proc_macro_attribute]
+pub fn process_register_block(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let parsed_input = parse_macro_input!(attr as MacroInput);
+    let register = format_ident!("{}Registers", parsed_input.peripheral_name);
+    let internal_register = format_ident!("block");
+    let state_enum_ident = format_ident!("{}StateEnum", parsed_input.peripheral_name);
 
-mod custom_keywords {
-    syn::custom_keyword!(peripheral_name);
-    syn::custom_keyword!(registers);
-    syn::custom_keyword!(states);
-    syn::custom_keyword!(register_base_addr);
-}
+    let mut result = add_imports();
+    result.extend(generate_register_wrapper(&register, &internal_register));
+    result.extend(generate_state_enum(
+        &parsed_input.state_definitions,
+        &register,
+        &state_enum_ident,
+    ));
 
-struct Register {
-    name: Ident,
-    valid_states: Punctuated<State, syn::Token![,]>,
-    register_shortname: syn::GenericArgument,
-    register_type: parsing::RegisterType,
-    register_bitwidth: Ident,
-}
+    let (states_generated, _) = parsed_input.generate_states(&register, &state_enum_ident);
+    result.extend(states_generated);
 
-impl Register {
-    /// Create passthrough for valid tock-register operations for each
-    /// AbacusRegister type.
-    fn generate_register_op_bindings(&self, register_name: &Ident) -> proc_macro2::TokenStream {
-        let register_bitwidth = self.register_bitwidth.clone();
-        let register_shortname = self.register_shortname.clone();
-        let validstate = self
-            .valid_states
-            .first()
-            .expect("generate reg op bindings")
-            .form_state_marker_type();
+    let ast: DeriveInput =
+        syn::parse(item).expect("Abacus Macro - Error Parsing Provided AST of register struct.");
+    let data = match &ast.data {
+        syn::Data::Struct(data) => data,
+        _ => panic!("Abacus Macro - Unsupported type; must be a struct."),
+    };
 
-        // Determine if this state contains an Any substate.
-        let is_anytype = self
-            .valid_states
-            .first()
-            .unwrap()
-            .substates
-            .iter()
-            .any(|substate| substate.to_string() == "Any");
-
-        // An `Any` substate means any state is valid. To mock up this behavior in the
-        // type system, we must replace the Any substate with a generic type.
-        let map_any = |mut state: State, generic_seed: String| {
-            // For any substate that is Any, replace with generic T.
-
-            let form_generic = |generic: Ident| {
-                quote!(
-                    #generic: SubState
-                )
-            };
-
-            // These substates may be different, so we need to make distinct
-            // generics.
-            let mut count = 0;
-            for substate in state.substates.iter_mut() {
-                if substate.to_string() == "Any" {
-                    *substate = format_ident!("{}{}", generic_seed, count.to_string());
-                    count += 1;
-                }
-            }
-
-            // create comma separated list T0, T1, ..., T(n) for the number
-            // count
-            let generic_params = (0..count).map(|index| {
-                let generic = format_ident!("{}{}", generic_seed, index.to_string());
-                generic
-            });
-
-            let generic_params_constrained: Vec<_> = (0..count)
-                .map(|index| {
-                    let generic = format_ident!("{}{}", generic_seed, index.to_string());
-                    form_generic(generic)
-                })
-                .collect();
-
-            let generic_tokens = quote! {
-                #(#generic_params),*
-            };
-
-            (
-                state.form_concrete_state_type(),
-                generic_tokens,
-                generic_params_constrained,
-            )
-        };
-
-        // FIXME: This only accounts for the first state. We need to account for all states.in the
-        // valid states. StateChangeRegister currently does this, but all register types should.
-        match &self.register_type {
-            RegisterType::ReadOnly => {
-                if is_anytype {
-                    let (state_ident, generic_tokens, generic_tokens_constrained) =
-                        map_any(self.valid_states.first().unwrap().clone(), format! {"T"});
-                    quote! {
-                        impl <#generic_tokens> ReadOnlyRegister<#register_bitwidth, #register_shortname, #state_ident>
-                        where
-                            #state_ident: State,
-                            #(#generic_tokens_constrained),*
-                        {
-                            pub fn get(&self) -> #register_bitwidth {
-                                self.reg.get()
-                            }
-
-                            pub fn read(&self, field: Field<#register_bitwidth, #register_shortname>) -> #register_bitwidth {
-                                self.reg.read(field)
-                            }
-                        }
-                    }
-                } else {
-                    quote! {
-                        impl ReadOnlyRegister<#register_bitwidth, #register_shortname, #validstate> {
-                            pub fn get(&self) -> #register_bitwidth {
-                                self.reg.get()
-                            }
-
-                            pub fn read(&self, field: Field<#register_bitwidth, #register_shortname>) -> #register_bitwidth {
-                                self.reg.read(field)
-                            }
-                        }
-                    }
-                }
-            }
-            RegisterType::WriteOnly => {
-                if is_anytype {
-                    let (state_ident, generic_tokens, generic_tokens_constrained) =
-                        map_any(self.valid_states.first().unwrap().clone(), format! {"T"});
-                    quote! {
-                        impl <#generic_tokens> WriteOnlyRegister<#register_bitwidth, #register_shortname, #state_ident>
-                        where
-                            #state_ident: State,
-                            #(#generic_tokens_constrained),*
-                        {
-                            pub fn set(&self, value: #register_bitwidth) {
-                                self.reg.set(value)
-                            }
-
-                            pub fn write(&self, value: FieldValue<#register_bitwidth, #register_shortname>) {
-                                self.reg.write(value)
-                            }
-                        }
-                    }
-                } else {
-                    quote! {
-                        impl WriteOnlyRegister<#register_bitwidth, #register_shortname, #validstate> {
-                            pub fn set(&self, value: #register_bitwidth) {
-                                self.reg.set(value)
-                            }
-
-                            pub fn write(&self, value: FieldValue<#register_bitwidth, #register_shortname>) {
-                                self.reg.write(value)
-                            }
-
-                            pub fn modify_no_read(&self,
-                                original: LocalRegisterCopy<#register_bitwidth, #register_shortname>,
-                                value: FieldValue<#register_bitwidth, #register_shortname>) {
-                                    self.reg.modify_no_read(original, value)
-                            }
-                        }
-                    }
-                }
-            }
-            RegisterType::ReadWrite => {
-                if is_anytype {
-                    let (state_ident, generic_tokens, generic_tokens_constrained) =
-                        map_any(self.valid_states.first().unwrap().clone(), format! {"T"});
-                    quote! {
-                        impl <#generic_tokens> ReadWriteRegister<#register_bitwidth, #register_shortname, #state_ident>
-                        where
-                            #state_ident: State,
-                            #(#generic_tokens_constrained),*
-                        {
-                            pub fn get(&self) -> #register_bitwidth {
-                                self.reg.get()
-                            }
-                            pub fn set(&self, value: #register_bitwidth) {
-                                self.reg.set(value)
-                            }
-
-                            pub fn write(&self, value: FieldValue<#register_bitwidth, #register_shortname>) {
-                                self.reg.write(value)
-                            }
-
-                            pub fn is_set(&self, field: Field<#register_bitwidth, #register_shortname>) -> bool {
-                                self.reg.is_set(field)
-                            }
-
-                            pub fn modify(&self, value: FieldValue<#register_bitwidth, #register_shortname>) {
-                                self.reg.modify(value)
-                            }
-
-                            pub fn modify_no_read(&self,
-                                original: LocalRegisterCopy<#register_bitwidth, #register_shortname>,
-                                value: FieldValue<#register_bitwidth, #register_shortname>) {
-                                    self.reg.modify_no_read(original, value)
-                            }
-
-                            pub fn read(&self, field: Field<#register_bitwidth, #register_shortname>) -> #register_bitwidth {
-                                self.reg.read(field)
-                            }
-                        }
-                    }
-                } else {
-                    quote! {
-                        impl ReadWriteRegister<#register_bitwidth, #register_shortname, #validstate> {
-                            pub fn get(&self) -> #register_bitwidth {
-                                self.reg.get()
-                            }
-                            pub fn set(&self, value: #register_bitwidth) {
-                                self.reg.set(value)
-                            }
-
-                            pub fn write(&self, value: FieldValue<#register_bitwidth, #register_shortname>) {
-                                self.reg.write(value)
-                            }
-                            pub fn is_set(&self, field: Field<#register_bitwidth, #register_shortname>) -> bool {
-                                self.reg.is_set(field)
-                            }
-
-                            pub fn modify(&self, value: FieldValue<#register_bitwidth, #register_shortname>) {
-                                self.reg.modify(value)
-                            }
-
-                            pub fn modify_no_read(&self,
-                                original: LocalRegisterCopy<#register_bitwidth, #register_shortname>,
-                                value: FieldValue<#register_bitwidth, #register_shortname>) {
-                                    self.reg.modify_no_read(original, value)
-                            }
-
-                            pub fn read(&self, field: Field<#register_bitwidth, #register_shortname>) -> #register_bitwidth {
-                                self.reg.read(field)
-                            }
-                        }
-                    }
-                }
-            }
-            RegisterType::StateChangeRW => {
-                if is_anytype {
-                    let (state_ident, generic_tokens, generic_tokens_constrained) =
-                        map_any(self.valid_states.first().unwrap().clone(), format! {"T"});
-                    quote! {
-                        impl <#generic_tokens> StateChangeRegister<#register_bitwidth, #register_shortname, #state_ident>
-                        where
-                            #state_ident: State,
-                            #(#generic_tokens_constrained),*
-                        {
-                            pub fn get(&self) -> #register_bitwidth {
-                                self.reg.get()
-                            }
-                            pub fn set(&self, value: #register_bitwidth) {
-                                self.reg.set(value)
-                            }
-
-                            pub fn write(&self, value: FieldValue<#register_bitwidth, #register_shortname>) {
-                                self.reg.write(value)
-                            }
-
-                            pub fn is_set(&self, field: Field<#register_bitwidth, #register_shortname>) -> bool {
-                                self.reg.is_set(field)
-                            }
-
-                            pub fn modify(&self, value: FieldValue<#register_bitwidth, #register_shortname>) {
-                                self.reg.modify(value)
-                            }
-
-                            pub fn modify_no_read(&self,
-                                original: LocalRegisterCopy<#register_bitwidth, #register_shortname>,
-                                value: FieldValue<#register_bitwidth, #register_shortname>) {
-                                    self.reg.modify_no_read(original, value)
-                            }
-
-                            pub fn read(&self, field: Field<#register_bitwidth, #register_shortname>) -> #register_bitwidth {
-                                self.reg.read(field)
-                            }
-                        }
-                    }
-                } else {
-                    quote! {
-                        impl StateChangeRegister<#register_bitwidth, #register_shortname, #validstate> {
-                            pub fn get(&self) -> #register_bitwidth {
-                                self.reg.get()
-                            }
-                            pub fn set(&self, value: #register_bitwidth) {
-                                self.reg.set(value)
-                            }
-
-                            pub fn write(&self, value: FieldValue<#register_bitwidth, #register_shortname>) {
-                                self.reg.write(value)
-                            }
-                            pub fn is_set(&self, field: Field<#register_bitwidth, #register_shortname>) -> bool {
-                                self.reg.is_set(field)
-                            }
-
-                            pub fn modify(&self, value: FieldValue<#register_bitwidth, #register_shortname>) {
-                                self.reg.modify(value)
-                            }
-
-                            pub fn modify_no_read(&self,
-                                original: LocalRegisterCopy<#register_bitwidth, #register_shortname>,
-                                value: FieldValue<#register_bitwidth, #register_shortname>) {
-                                    self.reg.modify_no_read(original, value)
-                            }
-
-                            pub fn read(&self, field: Field<#register_bitwidth, #register_shortname>) -> #register_bitwidth {
-                                self.reg.read(field)
-                            }
-                        }
-                    }
-                }
-            }
-            RegisterType::StateChange(state, instruction, shortname) => {
-                // for Punctuated<Path, Comma> form Path1 + Path2 + Path3
-                let instruct_ident = instruction.iter().map(|instr| {
-                    quote! {
-                        #instr
-                    }
-                });
-
-                let instruction_ts: proc_macro2::TokenStream = quote! {
-                    #(#instruct_ident)+*
-                };
-
-                let mut state_change_output = proc_macro2::TokenStream::new();
-
-                let reg_field_name = self.name.clone();
-                // Use shortname (e.g. transmit, receive) when provided, else state name (e.g. On)
-                let method_shortname = shortname.as_ref().unwrap_or(&state.state_name);
-                let trait_name = format_ident!("Step{}", method_shortname);
-
-                let to_state_fn_name =
-                    format_ident!("into_{}", method_shortname.to_string().to_lowercase());
-
-                if is_anytype {
-                    // Create copy of state to change
-                    let state = state.clone();
-                    let (to_state, to_state_generics, to_state_generics_constrained) =
-                        map_any(state, "T".to_string());
-
-                    // TODO: This is just a marker that we have an issue here. We will need to update
-                    // <impl T: SubState> to have more generics than T / F for more complex peripherals.
-
-                    let carrot_block = if to_state_generics_constrained.is_empty() {
-                        quote! {S}
-                    } else {
-                        quote! {#(#to_state_generics_constrained)*, S}
-                    };
-
-                    state_change_output.extend(quote! {
-                        trait #trait_name<#carrot_block>: Sized
-                        where
-                            #to_state: State,
-                            S: State,
-                            #register_name<#to_state>: Reg,
-                            #register_name<S>: Reg,
-                            #(#to_state_generics_constrained),*
-                        {
-                            fn #to_state_fn_name(
-                                self,
-                            ) -> #register_name<#to_state>;
-                        }
-                    });
-
-                    for state in &self.valid_states {
-                        let (from_state, _from_state_generics, from_state_generics_constrained) =
-                            map_any(state.clone(), "T".to_string());
-
-                        let constraints = merge_constraint_vec(
-                            to_state_generics_constrained.clone(),
-                            from_state_generics_constrained,
-                        );
-
-                        let carrot_block = if to_state_generics.to_string() == "" {
-                            quote! {#from_state}
-                        } else {
-                            quote! {#to_state_generics, #from_state}
-                        };
-
-                        state_change_output.extend(quote!{
-                            impl <#(#constraints),*> #trait_name<#carrot_block> for #register_name<#from_state> 
-                            where 
-                                #to_state: State,
-                                #from_state: State,
-                                #register_name<#to_state>: Reg,
-                                #register_name<#from_state>: Reg,
-                                #(#constraints),*
-                            {
-                                fn #to_state_fn_name(
-                                    self,
-                                ) -> #register_name<#to_state> {
-                                    self.#reg_field_name.reg.modify(#instruction_ts);
-
-                                    unsafe {
-                                        transmute::<
-                                            #register_name<#from_state>,
-                                            #register_name<#to_state>
-                                        >(self)
-                                    }
-                                }
-                            }
-                        })
-                    }
-
-                    state_change_output
-                } else {
-                    let to_state = state.form_concrete_state_type();
-
-                    state_change_output.extend(quote! {
-                        trait #trait_name<S: State>: Sized
-                        where
-                            #register_name<S>: Reg
-                        {
-                            fn #to_state_fn_name(
-                                self,
-                            ) -> #register_name<#to_state>;
-                        }
-                    });
-
-                    for state in &self.valid_states {
-                        let from_state = state.form_concrete_state_type();
-
-                        state_change_output.extend(quote! {
-                            impl #trait_name<#from_state> for #register_name<#from_state> {
-                                fn #to_state_fn_name(
-                                    self,
-                                ) -> #register_name<#to_state> {
-                                    self.#reg_field_name.reg.modify(#instruction_ts);
-
-                                    unsafe {
-                                        transmute::<
-                                            #register_name<#from_state>,
-                                            #register_name<#to_state>
-                                        >(self)
-                                    }
-                                }
-                            }
-                        });
-                    }
-
-                    state_change_output
-                }
-            }
+    let (field_details, reg_vec) = process_struct_fields(&data.fields);
+    result.extend(generate_register_bindings(&reg_vec, &register));
+    result.extend(register_type_definitions());
+    result.extend(quote! {
+        #[repr(C)]
+        pub struct #internal_register<S: State> {
+            #(#field_details),*
         }
-    }
-}
+    });
 
-struct MacroInput {
-    peripheral_name: String,
-    state_definitions: Vec<StateDefinition>,
-}
-
-impl MacroInput {
-    fn generate_states(
-        &self,
-        register_name: &Ident,
-        state_enum_name: &Ident,
-    ) -> (proc_macro2::TokenStream, HashMap<String, State>) {
-        let mut output = proc_macro2::TokenStream::new();
-
-        // The other state hashes include the substates. This is strictly
-        // looking at the State name
-        let mut strict_state_hash = HashSet::new();
-
-        let mut created_states: HashSet<syn::Ident> = HashSet::new();
-
-        let mut unique_substates = HashSet::new();
-        unique_substates.insert(format_ident!("Any"));
-
-        let mut state_hash = HashSet::new();
-
-        let mut state_map = HashMap::new();
-        for state_def in &self.state_definitions {
-            let state = state_def.state.clone();
-            if !strict_state_hash.contains(state.state_name.to_string().as_str()) {
-                if state.substates.is_empty() {
-                    output.extend(quote! {});
-                } else if state.substates.len() == 1 {
-                    output.extend(quote! {})
-                } else if state.substates.len() == 2 {
-                    output.extend(quote! {});
-                } else {
-                    unimplemented!("Only 2 substates are supported.");
-                }
-
-                strict_state_hash.insert(state.state_name.to_string());
-            }
-
-            // State hash map used for name mapping later.
-            state_map.insert(state.form_state_marker_type().to_string(), state.clone());
-
-            let mut state = state.clone();
-            let original_substates = state.substates.clone();
-
-            // We need to generate each substate as:
-            // 1. The specified state.
-            // 2. As potentially an any state.
-            // 3. As potentially all being any states.
-            // TODO: We need to add logic for if there are 3 substates (e.g. <Any, Any, Tx>)
-            for iter in 0..(&state.substates.len() + 2) {
-                let mut any_positions: Option<Vec<(usize, Ident)>> = None;
-
-                // Case (1)
-                state.substates = original_substates.clone();
-
-                // Case (2)
-                if iter < state.substates.len() {
-                    any_positions = Some(vec![(iter, state.substates[iter].clone())]);
-                    state.substates[iter] = format_ident!("Any");
-                }
-
-                // Case (3)
-                if iter == state.substates.len() {
-                    // Update substates to all be "Any" and record positions with prior ident value
-                    let mut vec: Vec<(usize, Ident)> = Vec::new();
-                    for (pos, substate) in state.substates.iter().enumerate() {
-                        vec.push((pos, substate.clone()));
-                    }
-
-                    any_positions = Some(vec);
-                    state
-                        .substates
-                        .iter_mut()
-                        .for_each(|substate| *substate = format_ident!("Any"));
-                }
-
-                let state_ident = state.state_name.clone();
-
-                for substate in &state.substates {
-                    unique_substates.insert(substate.clone());
-                }
-
-                let struct_name = if state.substates.is_empty() {
-                    quote! {#state_ident}
-                } else {
-                    let generic_params = state.substates.iter().enumerate().map(|(index, _)| {
-                        let entry = format!("T{}", index);
-                        let generic = syn::Ident::new(&entry, Span::call_site());
-
-                        quote! {
-                            #generic: SubState
-                        }
-                    });
-
-                    quote! {
-                        #state_ident<#(#generic_params),*>
-                    }
-                };
-
-                let fields = state.substates.iter().enumerate().map(|(index, _)| {
-                    let field_name = format!("associated_{}", index);
-                    let generic_name = format!("T{}", index);
-
-                    let generic = syn::Ident::new(&generic_name, Span::call_site());
-                    let field = syn::Ident::new(&field_name, Span::call_site());
-
-                    quote! {
-                        #field: PhantomData<#generic>
-                    }
-                });
-
-                // To avoid duplicate implementations for a type, check if it has already been used.
-                let concrete_state_str = state.form_concrete_state_type().to_string();
-                if state_hash.contains(&concrete_state_str) {
-                    // if any_positions.is_some() {
-                    //     output.extend(state.generate_state(register_name, store_name, &struct_name, all_states_vec.clone(), any_positions, true));
-                    // }
-                    continue; // Skip creating this state, as it has already been created.
-                } else {
-                    state_hash.insert(concrete_state_str.clone());
-                }
-
-                if !created_states.contains(&state.state_name) {
-                    output.extend(quote! {
-                        pub struct #struct_name {
-                            #(#fields),*
-                        }
-                    });
-
-                    created_states.insert(state.state_name.clone());
-                }
-
-                // Generate State/Reg/From/TryFrom impls. Avoid overlapping impls (E0119):
-                // - Concrete states without substates (e.g. Off): full impls
-                // - Concrete states with substates (e.g. Active<RxIdle, TxIdle>): From/TryFrom
-                //   only (State/Reg provided by generic impl from (Any, Any))
-                // - Fully generic (Any, Any): State and Reg only
-                // - Partially generic (Any, TxIdle), (RxIdle, Any): skip
-                let is_concrete = !state.contains_any();
-                let is_fully_generic = state
-                    .substates
-                    .iter()
-                    .all(|s| s.to_string() == "Any");
-                let has_substates = !state.substates.is_empty();
-                if is_concrete {
-                    let synthetic_state_def = StateDefinition {
-                        state: state.clone(),
-                        transient: state_def.transient,
-                        state_shortname: state_def.state_shortname.clone(),
-                    };
-                    if has_substates {
-                        output.extend(generating::generate_state_conversion_impls_only(
-                            &synthetic_state_def,
-                            state_enum_name,
-                            register_name,
-                        ));
-                    } else {
-                        output.extend(generating::generate_state(
-                            &synthetic_state_def,
-                            state_enum_name,
-                            register_name,
-                        ));
-                    }
-                } else if is_fully_generic {
-                    let synthetic_state_def = StateDefinition {
-                        state: state.clone(),
-                        transient: state_def.transient,
-                        state_shortname: state_def.state_shortname.clone(),
-                    };
-                    output.extend(generating::generate_state_trait_impls_only(
-                        &synthetic_state_def,
-                        register_name,
-                        state_enum_name,
-                    ));
-                }
-            }
-        }
-
-        // create substates
-        for substate in unique_substates {
-            let substate_ident = format_ident!("{}", substate);
-
-            output.extend(quote! {
-                pub struct #substate_ident {}
-
-                impl SubState for #substate_ident {}
-            });
-        }
-
-        (output, state_map)
-    }
+    result.into()
 }
 
 fn add_imports() -> proc_macro2::TokenStream {
     quote!(
-        use abacus_registers::{State, SubState, StateEnum, Reg, SyncState, AbacusStaticRef};
+        use abacus_registers::{State, SubState, StateEnum, Reg, SyncState, TransientStateReg, AbacusStaticRef};
         use core::marker::PhantomData;
         use core::mem::transmute;
         use core::ops::Deref;
@@ -693,110 +88,21 @@ fn add_imports() -> proc_macro2::TokenStream {
     )
 }
 
-impl Parse for MacroInput {
-    fn parse(input: ParseStream) -> syn::Result<Self> {
-        let _: custom_keywords::peripheral_name = input.parse().map_err(|_| {
-            syn::Error::new(
-                input.span(),
-                "Abacus Macro - Expected 'peripheral_name' keyword",
-            )
-        })?;
-        let _: syn::Token![=] = input.parse().map_err(|_| {
-            syn::Error::new(
-                input.span(),
-                "Abacus Macro - Expected '=' after peripheral_name",
-            )
-        })?;
-        let peripheral_name: syn::LitStr = input.parse().map_err(|_| {
-            syn::Error::new(
-                input.span(),
-                "Abacus Macro - Expected string literal for peripheral_name",
-            )
-        })?;
-        let _: syn::Token![,] = input.parse().map_err(|_| {
-            syn::Error::new(
-                input.span(),
-                "Abacus Macro - Expected ',' after peripheral_name value",
-            )
-        })?;
-
-        let _: custom_keywords::register_base_addr = input.parse().map_err(|_| {
-            syn::Error::new(
-                input.span(),
-                "Abacus Macro - Expected 'register_base_addr' keyword",
-            )
-        })?;
-        let _: syn::Token![=] = input.parse().map_err(|_| {
-            syn::Error::new(
-                input.span(),
-                "Abacus Macro - Expected '=' after register_base_addr",
-            )
-        })?;
-        let _base_addr: syn::LitInt = input.parse().map_err(|_| {
-            syn::Error::new(
-                input.span(),
-                "Abacus Macro - Expected integer literal for register_base_addr",
-            )
-        })?;
-        let _: syn::Token![,] = input.parse().map_err(|_| {
-            syn::Error::new(
-                input.span(),
-                "Abacus Macro - Expected ',' after register_base_addr value",
-            )
-        })?;
-
-        let _: custom_keywords::states = input.parse().map_err(|_| {
-            syn::Error::new(input.span(), "Abacus Macro - Expected 'states' keyword")
-        })?;
-        let _: syn::Token![=] = input.parse().map_err(|_| {
-            syn::Error::new(input.span(), "Abacus Macro - Expected '=' after states")
-        })?;
-        let states_content;
-        let _: syn::token::Bracket = bracketed!(states_content in input);
-        let state_definitions: Punctuated<StateDefinition, syn::Token![,]> = states_content
-            .parse_terminated(StateDefinition::parse, syn::Token![,])
-            .map_err(|err| {
-                syn::Error::new(
-                    states_content.span(),
-                    format!(
-                        "Abacus Macro - Error parsing state definitions list: {}",
-                        err
-                    ),
-                )
-            })?;
-
-        Ok(MacroInput {
-            peripheral_name: peripheral_name.value(),
-            state_definitions: state_definitions.into_iter().collect(),
-        })
-    }
-}
-
-#[proc_macro_attribute]
-pub fn process_register_block(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let parsed_input = parse_macro_input!(attr as MacroInput);
-    // form reg and store type names from given peripheral name
-    let register = format_ident!("{}Registers", parsed_input.peripheral_name);
-    let internal_register = format_ident!("block");
-    let state_enum_ident = format_ident!("{}StateEnum", parsed_input.peripheral_name);
-
-    let mut result = add_imports();
-
-    // IN REGARDS TO THE NEW METHOD BELOW:
-    // The existence of this method destroys all guarantees. We need this
-    // to store the anytype, but need to do this in a controlled way so that
-    // we don't allow anyone to "escape" the power manager.
-    let block = quote! {
+fn generate_register_wrapper(
+    register: &syn::Ident,
+    internal_register: &syn::Ident,
+) -> proc_macro2::TokenStream {
+    quote! {
         pub struct #register<S: State> {
             reg:  AbacusStaticRef<#internal_register<S>>,
         }
 
-         impl <S: State> #register<S> {
-             pub const unsafe fn new(base_addr: usize) -> #register<S> {
-                 let reg = unsafe { AbacusStaticRef::new(base_addr as *const #internal_register<S>) };
-                 #register { reg }
-             }
-         }
+        impl <S: State> #register<S> {
+            pub const unsafe fn new(base_addr: usize) -> #register<S> {
+                let reg = unsafe { AbacusStaticRef::new(base_addr as *const #internal_register<S>) };
+                #register { reg }
+            }
+        }
 
         impl <S: State> Deref for #register<S> {
             type Target = #internal_register<S>;
@@ -804,168 +110,147 @@ pub fn process_register_block(attr: TokenStream, item: TokenStream) -> TokenStre
                 self.reg.deref()
             }
         }
-    };
+    }
+}
 
-    result.extend(block);
+fn process_struct_fields(fields: &syn::Fields) -> (Vec<proc_macro2::TokenStream>, Vec<Register>) {
+    let mut reg_vec = Vec::new();
+    let field_details: Vec<_> = fields
+        .iter()
+        .map(|field| {
+            let (tokens, mut registers) = process_field(field);
+            reg_vec.append(&mut registers);
+            tokens
+        })
+        .collect();
+    (field_details, reg_vec)
+}
 
-    // Generate states enum
-    result.extend(generate_state_enum(
-        &parsed_input.state_definitions,
-        &register,
-        &state_enum_ident,
-    ));
+fn process_field(field: &Field) -> (proc_macro2::TokenStream, Vec<Register>) {
+    let field_type = field.ty.clone();
+    let field_name = field
+        .ident
+        .clone()
+        .expect("Abacus Macro - Error in register struct field, expected field name.");
 
-    // Generate states
-    let (states_generated, _state_map) = parsed_input.generate_states(&register, &state_enum_ident);
-    result.extend(states_generated);
+    let requires_gen = field
+        .attrs
+        .iter()
+        .any(|attr| attr.path().is_ident("RegAttributes"));
 
-    let ast: DeriveInput =
-        syn::parse(item).expect("Abacus Macro - Error Parsing Provided AST of register struct.");
-
-    let data = match &ast.data {
-        syn::Data::Struct(data) => data,
-        _ => panic!("Abacus Macro - Unsupported type; must be a struct."),
-    };
-
-    let mut reg_vec: Vec<Register> = vec![];
-
-    // Iterator that is applied to each field in the register struct. Used to convert a
-    // tock register struct into an "abacus" struct.
-    let field_details = data.fields.iter().map(|field| {
-        let field_type = field.ty.clone();
-        let field_name = field.ident.clone().expect("Abacus Macro - Error in register struct field, expected field name.");
-
-        // If there is a `RegAttributes`, we will need to generate bindings.
-        let requires_gen = field.attrs.iter().any(|attr| {
-            // for each attribute in field attrs, leave all macros but
-            // RegAttributes.
-            if attr.path().is_ident("RegAttributes") {
-                return true;
-            }
-            false
-        });
-
-        let field_attr: Vec<_> = field.attrs.iter().filter_map(|attr| {
-            // For each attribute in field attrs, leave all macros but
-            // RegAttributes. There may be other non abacus macros and we don't want
-            // to clobber these. 
+    let field_attr: Vec<_> = field
+        .attrs
+        .iter()
+        .filter_map(|attr| {
             if !attr.path().is_ident("RegAttributes") {
                 Some(quote! {#attr})
             } else {
                 None
             }
-        }).collect();
+        })
+        .collect();
 
-
-        // Perform `RegAttribute` expansion here and transform relevant registers into "abacus registers". 
-        if requires_gen {
-            // Parse each register attribute.
-            let reg_attr_vec = field.attrs.iter().filter_map(|attr| {
-                // for each attribute in field attrs, leave doc macro comments
-                // and remove RegAttributes.
-                if attr.path().is_ident("RegAttributes") {
-                    attr.parse_args::<parsing::RegisterAttributes>().ok()
-                } else {
-                    None
-                }
-            }).collect::<Vec<_>>();
-
-            // To properly form the register bindings, we must also take information
-            // from the provided type.
-            if let Type::Path(type_path) = field_type.clone() {
-                let segment = type_path.path.segments.last().expect("Abacus Macro - Error, parsing tock-registers field.");
-
-                // Check for generics in original struct's type.
-                if let PathArguments::AngleBracketed(args) = &segment.arguments {
-                    let generic_args = &args.args;
-                    if generic_args.len() != 2 {
-                        panic!("Abacus Macro - Error, parsing expects tock-registers types to have 2 generics.");
-                    }
-                    let register_shortname = generic_args[1].clone();
-
-                    let register_bitwidth =
-                    if let syn::GenericArgument::Type(Type::Path(type_path)) = &generic_args[0]
-                    {
-                        let generic_ident = &type_path.path;
-                        generic_ident.segments.first().expect("Abacus Macro - Error, parsing expects tock-registers types to have 2 generics.").ident.clone()
-                    } else {
-                        panic!("Abacus Macro - Error, parsing generic arg 0.");
-                    };
-
-                let mut output = proc_macro2::TokenStream::new();
-
-                let mut first_item = true;
-                
-                // For each register field, we iterate through all the register 
-                // attributes and create a Register object for each attribute.
-                for reg_attr in reg_attr_vec {
-                    reg_vec.push(Register {
-                        name: field_name.clone(),
-                        valid_states: reg_attr.valid_states,
-                        register_shortname: register_shortname.clone(),
-                        register_type: reg_attr.register_type.clone(),
-                        register_bitwidth: register_bitwidth.clone(),
-                    });
-                    
-                    let reg_type = format_ident!("{}Register", &reg_attr.register_type.to_ident());
-
-                    
-                    if first_item {
-                        let field_attr_clone = field_attr.clone();
-                        output.extend(
-                            quote!{
-                                #(#field_attr_clone)*
-                                pub #field_name: #reg_type<#register_bitwidth, #register_shortname, S>
-                            }
-                        );
-
-                        first_item = false;
-                    }
-                }
-                // If all RegAttributes failed to parse, output stays empty and would produce
-                // invalid struct (leading commas). Fall back to passthrough of original type.
-                if output.is_empty() {
-                    quote! {
-                        #(#field_attr)*
-                        pub #field_name: #field_type
-                    }
-                } else {
-                    output
-                }
-                } else {
-                    panic!("Abacus Macro - Error, parsing expects tock-registers types to have 2 generics.");
-                }
-            } else {
-                panic!("unreachable b");
-            }
-        }
-    else {
-        quote! {
-            #(#field_attr)*
-            pub #field_name: #field_type
-
-        }
+    if !requires_gen {
+        return (
+            quote! { #(#field_attr)* pub #field_name: #field_type },
+            vec![],
+        );
     }
-    });
 
-    let struct_output = quote! {
-        #[repr(C)]
-        pub struct #internal_register<S: State> {
-            #(#field_details),*
-        }
+    let reg_attr_vec: Vec<_> = field
+        .attrs
+        .iter()
+        .filter_map(|attr| {
+            if attr.path().is_ident("RegAttributes") {
+                attr.parse_args::<parsing::RegisterAttributes>().ok()
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let Type::Path(type_path) = field_type.clone() else {
+        panic!("unreachable b");
     };
 
-    let mut generated_bindings_set = HashSet::new();
-    for reg in reg_vec {
-        //  result.extend(reg.generate_state_transition(&peripheral, &register));
-        let new_binding = reg.generate_register_op_bindings(&register);
-        if generated_bindings_set.insert(new_binding.clone().to_string()) {
-            result.extend(new_binding.clone());
+    let segment = type_path
+        .path
+        .segments
+        .last()
+        .expect("Abacus Macro - Error, parsing tock-registers field.");
+
+    let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+        panic!("Abacus Macro - Error, parsing expects tock-registers types to have 2 generics.");
+    };
+
+    let generic_args = &args.args;
+    if generic_args.len() != 2 {
+        panic!("Abacus Macro - Error, parsing expects tock-registers types to have 2 generics.");
+    }
+
+    let register_shortname = generic_args[1].clone();
+    let register_bitwidth = match &generic_args[0] {
+        syn::GenericArgument::Type(Type::Path(tp)) => tp
+            .path
+            .segments
+            .first()
+            .expect(
+                "Abacus Macro - Error, parsing expects tock-registers types to have 2 generics.",
+            )
+            .ident
+            .clone(),
+        _ => panic!("Abacus Macro - Error, parsing generic arg 0."),
+    };
+
+    let mut output = proc_macro2::TokenStream::new();
+    let mut registers = Vec::new();
+    let mut first_item = true;
+
+    for reg_attr in reg_attr_vec {
+        registers.push(Register {
+            name: field_name.clone(),
+            valid_states: reg_attr.valid_states,
+            register_shortname: register_shortname.clone(),
+            register_type: reg_attr.register_type.clone(),
+            register_bitwidth: register_bitwidth.clone(),
+        });
+
+        let reg_type = format_ident!("{}Register", &reg_attr.register_type.to_ident());
+        if first_item {
+            output.extend(quote! {
+                #(#field_attr)*
+                pub #field_name: #reg_type<#register_bitwidth, #register_shortname, S>
+            });
+            first_item = false;
         }
     }
 
-    // FIX ME
-    result.extend(quote! {
+    let output = if output.is_empty() {
+        quote! { #(#field_attr)* pub #field_name: #field_type }
+    } else {
+        output
+    };
+
+    (output, registers)
+}
+
+fn generate_register_bindings(
+    reg_vec: &[Register],
+    register: &syn::Ident,
+) -> proc_macro2::TokenStream {
+    let mut result = proc_macro2::TokenStream::new();
+    let mut seen = HashSet::new();
+    for reg in reg_vec {
+        let binding = reg.generate_register_op_bindings(register);
+        if seen.insert(binding.clone().to_string()) {
+            result.extend(binding);
+        }
+    }
+    result
+}
+
+fn register_type_definitions() -> proc_macro2::TokenStream {
+    quote! {
         pub enum RegisterResult<A: Reg, B: Reg> {
             Ok(A),
             Err(B),
@@ -1012,28 +297,5 @@ pub fn process_register_block(attr: TokenStream, item: TokenStream) -> TokenStre
             reg: WriteOnly<T, R>,
             associated_state: PhantomData<S>,
         }
-
-    });
-
-    result.extend(struct_output);
-    result.into()
-}
-
-fn merge_constraint_vec(
-    vec1: Vec<proc_macro2::TokenStream>,
-    vec2: Vec<proc_macro2::TokenStream>,
-) -> Vec<proc_macro2::TokenStream> {
-    let mut added: HashSet<_> = HashSet::new();
-    for item in vec1.clone() {
-        added.insert(item.clone().to_string());
     }
-
-    let mut output = vec1.clone();
-    for item in vec2 {
-        if !added.contains(item.clone().to_string().as_str()) {
-            output.push(item.clone());
-            added.insert(item.clone().to_string());
-        }
-    }
-    output
 }
