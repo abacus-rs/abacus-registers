@@ -5,9 +5,9 @@ on:
   push:
     branches: ["**"]   # any branch push
   pull_request:
-    branches: [main]   # merges into main
+    branches: [main]   # PRs into main
   schedule:
-    - cron: "0 6 * * *"  # nightly (6 AM UTC)
+    - cron: "0 6 * * *"  # nightly
   workflow_dispatch:
 
 jobs:
@@ -70,27 +70,33 @@ jobs:
           git submodule update --init --recursive
 
       # -------------------------------------------------
-      # Variant 1: Use CURRENT CI branch (most important)
-      # BEST for pushes to feature branches
+      # Variant 1: Use CURRENT CI branch (local checkout)
       # -------------------------------------------------
-      - name: Patch abacus_registers -> local checkout (CI branch)
+      - name: Patch abacus_registers -> local CI checkout
         if: matrix.source == 'ci-branch'
         run: |
-          echo "Using local abacus-registers checkout (branch: ${GITHUB_REF_NAME})"
           cd tock
-          printf '\n[patch.crates-io]\n' >> Cargo.toml
-          printf 'abacus_registers = { path = "../" }\n' >> Cargo.toml
+          mkdir -p .cargo
+          printf '%s\n' \
+            '[patch.crates-io]' \
+            'abacus_registers = { path = "../" }' \
+            '' \
+            '[patch."https://github.com/abacus-rs/abacus-registers"]' \
+            'abacus_registers = { path = "../" }' \
+            > .cargo/config.toml
 
       # -------------------------------------------------
       # Variant 2: Force main branch of abacus_registers
-      # Used for PRs + nightly
       # -------------------------------------------------
       - name: Patch abacus_registers -> git main
         if: matrix.source == 'main'
         run: |
           cd tock
-          printf '\n[patch."https://github.com/abacus-rs/abacus-registers"]\n' >> Cargo.toml
-          printf 'abacus_registers = { git = "https://github.com/abacus-rs/abacus-registers", branch = "main" }\n' >> Cargo.toml
+          mkdir -p .cargo
+          printf '%s\n' \
+            '[patch."https://github.com/abacus-rs/abacus-registers"]' \
+            'abacus_registers = { git = "https://github.com/abacus-rs/abacus-registers", branch = "main" }' \
+            > .cargo/config.toml
 
       # -------------------------------------------------
       # Variant 3: crates.io (disabled until published)
@@ -99,8 +105,11 @@ jobs:
         if: matrix.source == 'crate'
         run: |
           cd tock
-          printf '\n[patch.crates-io]\n' >> Cargo.toml
-          printf 'abacus_registers = { version = "*" }\n' >> Cargo.toml
+          mkdir -p .cargo
+          printf '%s\n' \
+            '[patch.crates-io]' \
+            'abacus_registers = { version = "*" }' \
+            > .cargo/config.toml
 
       - name: Show resolved abacus source
         run: |
