@@ -1,0 +1,40 @@
+# .github/workflows/build-tock.yml
+name: Build Tock OS
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: # allows manual trigger
+
+jobs:
+  build-tock:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout this workflow repo
+      uses: actions/checkout@v3
+
+    - name: Install Rust toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        profile: minimal
+        override: true
+
+    - name: Install LLVM (required for some boards)
+      run: sudo apt-get update && sudo apt-get install -y llvm clang
+
+    - name: Clone Tock repository
+      run: |
+        git clone https://github.com/abacus-rs/tock.git
+        cd tock
+        git checkout main
+
+    - name: Build Tock for boards
+      run: |
+        cd tock
+        # Build the kernel (Rust) for the default board (e.g., hail)
+        # Add targets if needed: rustup target add thumbv7em-none-eabihf
+        rustup target add thumbv7em-none-eabihf
+        make -C boards/nordic/nrf52840dk
