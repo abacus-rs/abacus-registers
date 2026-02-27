@@ -1,3 +1,56 @@
+//! Parsing logic for the Abacus Macro.
+//! 
+//! This handles the parsing of the Abacus DSL and converts it into a 
+//! objects that can be used for code generation.
+//! 
+//! Valid Input of the form (w/o substates):
+//! 
+//! ```Rust
+//! #[process_register_block(
+//!     peripheral_name = "Nrf5xTemp",
+//!     register_base_addr = 0x4000C000,
+//!     states = [
+//!         (Off),
+//!         (Reading, *T*),
+//!     ]
+//! )]
+//! struct TemperatureRegisters {
+//!     /// Start temperature measurement
+//!     /// Address: 0x000 - 0x004
+//!     #[RegAttributes([Off], StateChange(Reading, [Task::ENABLE::SET]))]
+//!     pub task_start: WriteOnly<u32, Task::Register>,
+//!     /// Stop temperature measurement
+//!     /// Address: 0x004 - 0x008
+//!     #[RegAttributes([Reading], StateChange(Off, [Task::ENABLE::SET]))]
+//!     pub task_stop: WriteOnly<u32, Task::Register>,
+//! }
+//! ```
+//! 
+//! Valid Input of the form (w/ substates):
+//! 
+//! ```Rust
+//! #[process_register_block(
+//!     peripheral_name = "Nrf52Uart,
+//!     register_base_addr = 0x4000C000,
+//!     states = [
+//!         (Off),
+//!         (Reading(Tx, Rx), *T*),
+//!     ]
+//! )]
+//! struct TemperatureRegisters {
+//!     #[RegAttributes([Off], StateChange(Reading, [Task::ENABLE::SET]))]
+//!     pub task_start: WriteOnly<u32, Task::Register>,
+//!     #[RegAttributes([Reading(Tx, Rx)], StateChange(Off, [Task::ENABLE::SET]), transmit)
+//!     pub task_stop: WriteOnly<u32, Task::Register>,
+//! }
+//! ```
+//! 
+//! The DSL consists of two primary annotations: 
+//!   - Top level to specify the states, substates, shortname (that is used for states w/ substates)
+//!     and whether a given state is a transient state.
+//!   - `RegAttributes` to specify stateful constraints for a given register.
+//!   - (TODO ADD MORE DETAILS HERE)
+
 use quote::format_ident;
 use syn::{
     bracketed,
@@ -24,15 +77,15 @@ pub struct StateDefinition {
 }
 
 impl Parse for State {
-    /// Function to Parse a provided State and Transition.
-    ///
-    /// Example Inputs:
-    /// State
-    /// State(SubState)
-    /// State(SubState1, SubState2)
     fn parse(input: ParseStream) -> syn::Result<Self> {
+        // Valid Inputs:
+        // State
+        // State(SubState)
+        // State(SubState1, SubState2, .., SubStateN)
         let state_name: Ident = input.parse()
-            .map_err(|_| syn::Error::new(input.span(), "Abacus Macro Error - State Parsing declaration missing. Valid states are of the form `State`, `State(SubState)`, `State(SubState1, SubState2)`"))?;
+            .map_err(|_| syn::Error::new(input.span(), 
+            "State Parsing declaration missing. Valid states are one of \
+            the following:`State`, `State(SubState)`, `State(SubState1, SubState2, .., SubStateN)`"))?;
 
         // Check for substates - of the form State(SubState, ..., SubStateN)
         let substates = if input.peek(syn::token::Paren) {
@@ -40,10 +93,19 @@ impl Parse for State {
             let _: syn::token::Paren = syn::parenthesized!(substate_def in input);
             let substates: Punctuated<Ident, syn::Token![,]> = substate_def
                 .parse_terminated(syn::Ident::parse, syn::Token![,])
-                .map_err(|_| syn::Error::new(substate_def.span(), "Abacus Macro Error - SubState Parsing declaration invalid. Valid state/substates are of the form `State`, `State(SubState)`, `State(SubState1, SubState2)`"))?;
+                .map_err(|_| syn::Error::new(substate_def.span(), 
+                "SubState Parsing declaration invalid. Valid state/substates \
+                are one of the following: `State(SubState)`, `State(SubState1, SubState2, .., SubStateN)`"))?;
             Some(substates)
         } else { None }
         .unwrap_or_else(|| Punctuated::new());
+
+        if substates.len() > 2 {
+            return Err(syn::Error::new(input.span(), 
+            "Only 2 substates are supported for now. \
+            Please file an issue at https://github.com/abacus-rs/abacus-registers/issues \
+            if your use case requires more than 2 substates."));
+        }
 
         Ok(State {
             state_name,
@@ -62,25 +124,36 @@ impl Parse for StateDefinition {
         // - (State, *T*) - transient state
         // - (State(SubState1, ..., SubStateN), shortname, *T*) - transient state with substates
 
-        let state_origin_definition;
-        let _: syn::token::Paren = syn::parenthesized!(state_origin_definition in input);
-        let state = state_origin_definition.parse::<State>().map_err(|_| {
+        // Confirm that the state definition is parenthesized, give more descriptive 
+        // error if not. This is required since `parenthesized!` macro does not give 
+        // adequetly descriptive error messages.
+        if !input.peek(syn::token::Paren) {
+            return Err(syn::Error::new(input.span(), 
+            "State Definition Parsing, state definition must be parenthesized. \
+            Should be of the form `(State, shortname, *T*)`"));
+        }
+
+        let state_definition;
+        let _: syn::token::Paren = syn::parenthesized!(state_definition in input);
+        let state = state_definition.parse::<State>().map_err(|state_err| {
             syn::Error::new(
-                state_origin_definition.span(),
-                "Abacus Macro - Error Parsing State.",
+                state_definition.span(),
+                format!("Error Parsing State: {}", state_err),
             )
         })?;
 
         let state_shortname = if !state.substates.is_empty() {
             // States with SubState must provide a "shortname" of the form
             // (State(Substates...), shortname).
-            let _: syn::token::Comma = state_origin_definition.parse()
-                .map_err(|_| syn::Error::new(state_origin_definition.span(), "Abacus Macro Error - State Definition Parsing, no comma between state(substate1, ..., substateN) and shortname. Should be of the form `(State(SubState1, ..., SubState2), shortname)`"))?;
+            let _: syn::token::Comma = state_definition.parse()
+                .map_err(|_| syn::Error::new(state_definition.span(), 
+                "State Definition Parsing, no comma between state(substate1, ..., substateN) /
+                and shortname. Should be of the form `(State(SubState1, ..., SubState2), shortname)`"))?;
 
-            state_origin_definition.parse().map_err(|_| {
+            state_definition.parse().map_err(|_| {
                 syn::Error::new(
-                    state_origin_definition.span(),
-                    "Abacus Macro Error - State Parsing, shortname not provided.",
+                    state_definition.span(),
+                    "State Parsing, shortname not provided.",
                 )
             })?
         } else {
@@ -89,28 +162,29 @@ impl Parse for StateDefinition {
 
         // Optional *T* transient marker in the remaining parenthesized content.
         let mut transient = false;
-        if state_origin_definition.parse::<syn::Token![,]>().is_ok() {
-            let _: syn::Token![*] = state_origin_definition.parse().map_err(|e| {
-                syn::Error::new(e.span(), "Abacus Macro Error - Expected * at start of transient marker *T*. Should be of the form `(State, *T*)`")
+        if state_definition.parse::<syn::Token![,]>().is_ok() {
+            let _: syn::Token![*] = state_definition.parse().map_err(|e| {
+                syn::Error::new(e.span(), "Expected * at start of transient marker *T*. Should be of the form `(State, *T*)`")
             })?;
-            let t_ident: Ident = state_origin_definition.parse().map_err(|e| {
-                syn::Error::new(e.span(), "Abacus Macro Error - Expected 'T' in transient marker *T*. Should be of the form `(State, *T*)`")
+            let t_ident: Ident = state_definition.parse().map_err(|e| {
+                syn::Error::new(e.span(), "Expected 'T' in transient marker *T*. Should be of the form `(State, *T*)`")
             })?;
+
             if t_ident.to_string() != "T" {
                 return Err(syn::Error::new(
                     t_ident.span(),
-                    format!("Abacus Macro Error - Transient marker *T* must be followed by 'T'. Instead found: {}", t_ident),
+                    format!("Transient marker is invalid. Expected *T*, instead found: {}", t_ident),
                 ));
             }
-            let _: syn::Token![*] = state_origin_definition.parse().map_err(|_| syn::Error::new(state_origin_definition.span(), "Abacus Macro Error - Error Parsing transient marker *T*. Should be of the form `(State, *T*)`"))?;
+            let _: syn::Token![*] = state_definition.parse().map_err(|_| syn::Error::new(state_definition.span(), "Error Parsing transient marker *T*. Should be of the form `(State, *T*)`"))?;
             transient = true;
         }
 
         // Check if anything else is left in the state definition
-        if !state_origin_definition.is_empty() {
+        if !state_definition.is_empty() {
             return Err(syn::Error::new(
-                state_origin_definition.span(),
-                format!("Abacus Macro Error - Transient marker *T* must be followed by nothing else. Instead found tokens: {}", state_origin_definition),
+                state_definition.span(),
+                format!("Transient marker *T* must be followed by nothing else. Instead found tokens: {}", state_definition),
             ));
         }
 
@@ -118,7 +192,7 @@ impl Parse for StateDefinition {
         if !input.is_empty() && !input.peek(syn::Token![,]) {
             return Err(syn::Error::new(
                 input.span(),
-                "Abacus Macro Error - Unexpected tokens after state definition. Each `(State, ...)` entry must be separated by commas.",
+                "Unexpected tokens after state definition. Each `(State, ...)` entry must be separated by commas.",
             ));
         }
 
@@ -176,7 +250,8 @@ impl Parse for RegisterType {
                 })?;
 
                 let _: syn::Token![,] = content.parse()
-                    .map_err(|_| syn::Error::new(content.span(), "Error in Register Attribute, State Change; missing `,` between the new state and bit field values that result in the given transition."))?;
+                    .map_err(|_| syn::Error::new(content.span(), "Error in Register Attribute, State Change; missing \
+                `,` between the new state and bit field values that result in the given transition."))?;
 
                 // Bracketed list of bitfield values that will result in this
                 // state transition.
