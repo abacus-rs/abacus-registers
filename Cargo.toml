@@ -1,18 +1,12 @@
 [package]
 name = "abacus-registers"
 version = "0.1.0"
-# authors = TODO
-# description = TODO
-# homepage = TODO
-# repository = TODO
+description = "System to statically prevent driver device protocol bugs via Abacus DSL and typestates" 
+repository = "https://github.com/abacus-rs/abacus-registers" 
 readme = "README.md"
-# keywords = TODO
-# categories = TODO
-license = "MIT/Apache-2.0"
+keywords = ["Drivers", "TypeStates", "Device Protocol Bugs"]
+license = "MIT"
 edition = "2021"
-
-[lints]
-#iworkspace = true
 
 [dependencies]
 code_gen = { path = "code_gen" }
