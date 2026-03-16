@@ -27,15 +27,15 @@ jobs:
 
           elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
             # Full integration test for merges into main
-            echo 'matrix={"source":["ci-branch","main","crate"]}' >> $GITHUB_OUTPUT
+            echo 'matrix={"source":["ci-branch","main"]}' >> $GITHUB_OUTPUT
 
           elif [[ "${{ github.event_name }}" == "schedule" ]]; then
-            # Nightly stability check (main + future crate)
+            # Nightly stability check, including the published crate
             echo 'matrix={"source":["main","crate"]}' >> $GITHUB_OUTPUT
 
           else
             # Manual dispatch = full test
-            echo 'matrix={"source":["ci-branch","main","crate"]}' >> $GITHUB_OUTPUT
+            echo 'matrix={"source":["ci-branch","main"]}' >> $GITHUB_OUTPUT
           fi
 
   build-tock:
@@ -79,10 +79,7 @@ jobs:
           mkdir -p .cargo
           printf '%s\n' \
             '[patch.crates-io]' \
-            'abacus_registers = { path = "../" }' \
-            '' \
-            '[patch."https://github.com/abacus-rs/abacus-registers"]' \
-            'abacus_registers = { path = "../" }' \
+            'abacus-registers = { path = "../" }' \
             > .cargo/config.toml
 
       # -------------------------------------------------
@@ -94,22 +91,19 @@ jobs:
           cd tock
           mkdir -p .cargo
           printf '%s\n' \
-            '[patch."https://github.com/abacus-rs/abacus-registers"]' \
-            'abacus_registers = { git = "https://github.com/abacus-rs/abacus-registers", branch = "main" }' \
+            '[patch.crates-io]' \
+            'abacus-registers = { git = "https://github.com/abacus-rs/abacus-registers", branch = "main" }' \
             > .cargo/config.toml
 
       # -------------------------------------------------
-      # Variant 3: crates.io (disabled until published)
+      # Variant 3: published crates.io release
       # -------------------------------------------------
-      - name: Patch abacus_registers -> crates.io
+      - name: Use published abacus_registers crate
         if: matrix.source == 'crate'
         run: |
           cd tock
-          mkdir -p .cargo
-          printf '%s\n' \
-            '[patch.crates-io]' \
-            'abacus_registers = { version = "*" }' \
-            > .cargo/config.toml
+          # Ensure no previous source override is active so Cargo resolves from crates.io.
+          rm -f .cargo/config.toml
 
       - name: Show resolved abacus source
         run: |
