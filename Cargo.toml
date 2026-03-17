@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "System to statically prevent driver device protocol bugs via Abacus DSL and typestates" 
 repository = "https://github.com/abacus-rs/abacus-registers" 
 readme = "README.md"
-keywords = ["Drivers", "TypeStates", "Device Protocol Bugs"]
+keywords = ["Drivers", "TypeStates"]
 license = "MIT"
 edition = "2021"
 
