@@ -80,8 +80,8 @@ impl State {
     /// When state contains `Any`, returns impl generics (e.g. `T0: SubState, T1: SubState`)
     /// for wrapping impl blocks. Returns None when no generics needed.
     pub fn form_impl_generics_token(&self) -> Option<proc_macro2::TokenStream> {
-        let gen = GeneratedStateType::new(self.clone());
-        gen.generic_parameter_list.map(|params| {
+        let generated = GeneratedStateType::new(self.clone());
+        generated.generic_parameter_list.map(|params| {
             quote! { #(#params: SubState),* }
         })
     }

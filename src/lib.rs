@@ -2,7 +2,7 @@
 use core::cell::Cell;
 use core::convert::TryFrom;
 
-pub use code_gen::process_register_block;
+pub use abacus_registers_dsl::process_register_block;
 pub use tock_registers;
 
 /// Trait denoting a register block and specifies

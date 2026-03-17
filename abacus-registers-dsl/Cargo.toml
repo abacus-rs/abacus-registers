@@ -1,14 +1,8 @@
 [package]
-name = "code_gen"
+name = "abacus-registers-dsl"
 version = "0.1.0"
-# authors = TODO
-# description = TODO
-# homepage = TODO
-# repository = TODO
-readme = "README.md"
-# keywords = TODO
-# categories = TODO
-license = "MIT/Apache-2.0"
+description = "Procedural macros used for encoding the Abacus DSL and generating the needed type-states."
+license = "MIT"
 edition = "2021"
 
 [lib]
